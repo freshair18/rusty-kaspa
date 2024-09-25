@@ -46,6 +46,8 @@ use crate::{
         window::WindowManager,
     },
 };
+use kaspa_merkle::{calc_merkle_root, create_merkle_witness, verify_merkle_witness, WitnessSegment};
+
 use kaspa_consensus_core::{
     acceptance_data::AcceptanceData,
     api::args::{TransactionValidationArgs, TransactionValidationBatchArgs},
@@ -983,7 +985,7 @@ impl VirtualStateProcessor {
         let storage_mass_activated = virtual_state.daa_score > self.storage_mass_activation_daa_score;
         let hash_merkle_root = calc_hash_merkle_root(txs.iter(), storage_mass_activated);
 
-        let accepted_id_merkle_root = kaspa_merkle::calc_merkle_root(virtual_state.accepted_tx_ids.iter().copied());
+        let accepted_id_merkle_root = calc_merkle_root(virtual_state.accepted_tx_ids.iter().copied());
         let utxo_commitment = virtual_state.multiset.clone().finalize();
         // Past median time is the exclusive lower bound for valid block time, so we increase by 1 to get the valid min
         let min_block_time = virtual_state.past_median_time + 1;
@@ -1158,6 +1160,59 @@ impl VirtualStateProcessor {
             // (normally at least genesis should be known).
             true
         }
+    }
+    pub fn create_merkle_witness_for_tx(&self, tracked_tx_id: Hash, block_hash: Hash) -> Option<Vec<WitnessSegment>> {
+        // arguably better here to make it return result? rethink
+        let mergeset_txs_manager = self.acceptance_data_store.get(block_hash); // I think this is incorrect
+        if mergeset_txs_manager.is_err() {
+            return None;
+        };
+        let mergeset_txs_manager = mergeset_txs_manager.unwrap();
+        let mut accepted_txs = vec![];
+        //would have preferred to do this with a map but the borrowing causes it to be difficult
+        for parent_acc_data in mergeset_txs_manager.iter() {
+            let parent_acc_txs = parent_acc_data.accepted_transactions.iter().map(|tx| tx.transaction_id);
+            for tx in parent_acc_txs {
+                accepted_txs.push(tx);
+            }
+        }
+        accepted_txs.sort();
+        // let storage_mass_activated: bool = block_daa_score > self.storage_mass_activation_daa_score;
+        create_merkle_witness(accepted_txs.into_iter(), tracked_tx_id)
+    }
+    pub fn verify_merkle_witness_for_tx(&self, witness: &[WitnessSegment], tracked_tx_id: Hash, block_hash: Hash) -> bool {
+        // arguably better here to make it return result? rethink
+        let mergeset_txs_manager = self.acceptance_data_store.get(block_hash); // I think this is incorrect
+        if mergeset_txs_manager.is_err() {
+            return false;
+        };
+        let block_header = self.headers_store.get_header(block_hash).unwrap();
+        let atmr = block_header.accepted_id_merkle_root;
+        verify_merkle_witness(witness, tracked_tx_id, atmr)
+    }
+    #[allow(unused_variables)]
+    pub fn calc_pochm_root(&self, block_hash: Hash) -> Hash {
+        let block_header = self.headers_store.get_header(block_hash).unwrap();
+        let next_posterity_hash = block_header.pruning_point; //possibly should pruning point of selected parent, possibly pruning point points to far back.
+        let next_posterity_daa_score = self.headers_store.get_header(next_posterity_hash).unwrap().daa_score;
+        /*PRIMITIVE PSEUDO CODE --- to be updated
+        let post_pruning_k= ...
+        let log_parents_list= (0..post_pruning_k).map(|i|{
+            let candidate=self.nth_selected_parent(block_hash,i32::pow(2,i));
+            let candidate_daa_score= self.headers_store.get_header(candidate).unwrap().daa_score;
+            if candidate_daa_score>next_posterity_daa_score //disputable logic
+            {
+                Some(candidate)
+            }
+            else {
+                None
+            }
+        });
+        cal_merkle_witness(log_parents_list)
+        END PSEUDO CODE
+        */
+
+        unimplemented!()
     }
 }
 
