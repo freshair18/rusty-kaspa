@@ -46,7 +46,9 @@ use crate::{
         window::WindowManager,
     },
 };
-use kaspa_merkle::{calc_merkle_root, create_merkle_witness, verify_merkle_witness, WitnessSegment};
+use kaspa_merkle::{
+    calc_merkle_root, create_merkle_witness_from_sorted, create_merkle_witness_from_unsorted, verify_merkle_witness, WitnessSegment,
+};
 
 use kaspa_consensus_core::{
     acceptance_data::AcceptanceData,
@@ -1177,42 +1179,89 @@ impl VirtualStateProcessor {
             }
         }
         accepted_txs.sort();
+
         // let storage_mass_activated: bool = block_daa_score > self.storage_mass_activation_daa_score;
-        create_merkle_witness(accepted_txs.into_iter(), tracked_tx_id)
+        create_merkle_witness_from_sorted(accepted_txs.into_iter(), tracked_tx_id)
     }
     pub fn verify_merkle_witness_for_tx(&self, witness: &[WitnessSegment], tracked_tx_id: Hash, block_hash: Hash) -> bool {
         // arguably better here to make it return result? rethink
         let mergeset_txs_manager = self.acceptance_data_store.get(block_hash); // I think this is incorrect
         if mergeset_txs_manager.is_err() {
             return false;
-        };
+        }
         let block_header = self.headers_store.get_header(block_hash).unwrap();
         let atmr = block_header.accepted_id_merkle_root;
         verify_merkle_witness(witness, tracked_tx_id, atmr)
     }
-    #[allow(unused_variables)]
-    pub fn calc_pochm_root(&self, block_hash: Hash) -> Hash {
+    pub fn log_sized_sel_parents(&self, block_hash: Hash) -> Vec<Hash> {
         let block_header = self.headers_store.get_header(block_hash).unwrap();
-        let next_posterity_hash = block_header.pruning_point; //possibly should pruning point of selected parent, possibly pruning point points to far back.
-        let next_posterity_daa_score = self.headers_store.get_header(next_posterity_hash).unwrap().daa_score;
-        /*PRIMITIVE PSEUDO CODE --- to be updated
-        let post_pruning_k= ...
-        let log_parents_list= (0..post_pruning_k).map(|i|{
-            let candidate=self.nth_selected_parent(block_hash,i32::pow(2,i));
-            let candidate_daa_score= self.headers_store.get_header(candidate).unwrap().daa_score;
-            if candidate_daa_score>next_posterity_daa_score //disputable logic
-            {
-                Some(candidate)
+        let prev_posterity_hash = block_header.pruning_point; //possibly pruning point points to far back. logic is flawed anyway: I must have this field before I have hash of the block...
+        let mut log_sized_parents_list = vec![];
+        for (i, current) in self.reachability_service.default_backward_chain_iterator(block_hash).enumerate() {
+            let index = i + 1; //enumeration should start from 1
+            if current == prev_posterity_hash {
+                break;
             }
-            else {
-                None
+            if (index & (index - 1)) == 0 {
+                //trickery to check if index is a power of two
+                log_sized_parents_list.push(current);
             }
-        });
-        cal_merkle_witness(log_parents_list)
-        END PSEUDO CODE
-        */
+            continue;
+        }
+        log_sized_parents_list
+    }
+    pub fn calc_pmr_root(&self, block_hash: Hash) -> Hash {
+        let log_sized_parents_list = self.log_sized_sel_parents(block_hash);
+        calc_merkle_root(log_sized_parents_list.into_iter())
+    }
+    pub fn create_pmr_witness(&self, leaf_block_hash: Hash, root_block_hash: Hash) -> Option<Vec<WitnessSegment>> {
+        let log_sized_parents_list = self.log_sized_sel_parents(root_block_hash);
 
-        unimplemented!()
+        create_merkle_witness_from_unsorted(log_sized_parents_list.into_iter(), leaf_block_hash)
+    }
+    pub fn verify_pmr_witness(&self, witness: &[WitnessSegment], leaf_block_hash: Hash, root_block_pmr: Hash) -> bool {
+        verify_merkle_witness(witness, leaf_block_hash, root_block_pmr)
+    }
+    pub fn create_pochm_proof(&self, block_hash: Hash) -> Option<Vec<(Vec<WitnessSegment>, Arc<Header>)>> {
+        let mut proof = vec![];
+        // let block_header = self.headers_store.get_header(block_hash).unwrap();
+        let post_posterity_hash = Hash::from(0); // just a default value to avoid compiler errors - COMPLETELY INCORRECT
+                                                 /*TODO: derive  post_posterity_hash of block hash, return None if it is not yet available*/
+        let mut prev_hash = post_posterity_hash;
+        for (i, current_hash) in self.reachability_service.default_backward_chain_iterator(post_posterity_hash).enumerate() {
+            let index = i + 1; //enumeration should start from 1
+            if current_hash == block_hash || (index & (index - 1)) == 0 {
+                //trickery to check if it is a power of two
+                let pmr_proof_for_current = self.create_pmr_witness(current_hash, prev_hash)?;
+                let prev_header: Arc<Header> = self.headers_store.get_header(prev_hash).unwrap();
+                proof.push((pmr_proof_for_current, prev_header));
+                prev_hash = current_hash;
+            }
+            if current_hash == block_hash {
+                break;
+            }
+        }
+        // let post_posterity_header = self.headers_store.get_header(post_posterity_hash).unwrap();
+        // proof.push(post_posterity_header.pochm_merkle_root());
+        Some(proof)
+    }
+    pub fn verify_pochm_proof(&self, block_hash: Hash, witness: Vec<(&[WitnessSegment], Arc<Header>)>) -> bool {
+        let _post_posterity_header = &witness[0].1;
+        // let post_posterity_hash=post_posterity_header.hash;
+        /*
+           TODO:verify that next_posterity_hash corresponds to a pruning/posterity block.
+           if not return false
+        */
+        let mut leaf_hashes = witness.clone().into_iter().map(|(_, header)| header.hash).chain(std::iter::once(block_hash));
+        leaf_hashes.next(); //remove first element to match accordingly to witnessess
+                            // let mut prev_header = post_posterity_header;
+        for ((pmr_witness, current_header), leaf_hash) in witness.iter().zip(leaf_hashes) {
+            //pretty ugly code all around
+            if !(self.verify_pmr_witness(pmr_witness, leaf_hash, current_header.pochm_merkle_root())) {
+                return false;
+            }
+        }
+        true
     }
 }
 
