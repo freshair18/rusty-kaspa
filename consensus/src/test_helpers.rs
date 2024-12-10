@@ -98,6 +98,7 @@ pub fn generate_random_header(rng: &mut SmallRng, parent_amount: usize) -> Heade
         generate_random_hash(rng),
         generate_random_hash(rng),
         generate_random_hash(rng),
+        generate_random_hash(rng),
         rng.gen(),
         rng.gen(),
         rng.gen(),

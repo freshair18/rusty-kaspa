@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use kaspa_merkle::MerkleWitness;
+use kaspa_merkle::{verify_merkle_witness, MerkleWitness};
 
 use crate::header::Header;
 use kaspa_hashes::Hash;
@@ -71,6 +71,21 @@ impl LogPathPochm {
     }
     pub fn get_path_origin(&self) -> Option<Hash> {
         self.vec.first().map(|seg| seg.header.hash)
+    }
+
+    pub fn verify_path(&self, destination_block_hash: Hash) -> bool {
+        let leaf_hashes = self.vec.iter()
+            .skip(1)//remove first element to match accordingly to witnesses 
+            .map(|pochm_seg| pochm_seg.header.hash)//map to hashes
+            .chain(std::iter::once(destination_block_hash)); // add final block
+
+        /*verify the path from posterity down to chain_purporter:
+        iterate downward from posterity block header: for each, verify that leaf hash is in pchmr of ther header */
+        self.vec.iter().zip(leaf_hashes).all(|(pochm_seg, leaf_hash)| {
+            let pchmr_root_hash = pochm_seg.header.pochm_merkle_root;
+            let witness = &pochm_seg.leaf_in_pchmr_witness;
+            verify_merkle_witness(witness, leaf_hash, pchmr_root_hash)
+        })
     }
 }
 

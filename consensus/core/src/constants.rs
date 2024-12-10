@@ -1,5 +1,6 @@
 /// BLOCK_VERSION represents the current block version
-pub const BLOCK_VERSION: u16 = 1;
+pub const LEGACY_BLOCK_VERSION: u16 = 1;
+pub const TRANSITION_BLOCK_VERSION: u16 = 2;
 
 /// TX_VERSION is the current latest supported transaction version.
 pub const TX_VERSION: u16 = 0;

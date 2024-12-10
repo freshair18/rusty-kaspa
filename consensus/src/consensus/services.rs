@@ -217,7 +217,7 @@ impl ConsensusServices {
             dag_traversal_manager.clone(),
             storage.hash_to_pchmr_store.clone(),
             params.storage_mass_activation,
-            params.kip6_activation,
+            params.block_version_transition_activation,
         );
 
         Arc::new(Self {

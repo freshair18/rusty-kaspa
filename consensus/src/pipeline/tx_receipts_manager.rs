@@ -6,9 +6,7 @@ use crate::model::{
 use crate::{
     consensus::services::DbDagTraversalManager,
     model::stores::{
-        block_transactions::BlockTransactionsStoreReader,
-        pchmr_store::{DbPchmrStore, PchmrStoreReader},
-        pruning::PruningStoreReader,
+        block_transactions::BlockTransactionsStoreReader, pchmr_store::DbPchmrStore, pruning::PruningStoreReader,
         selected_chain::SelectedChainStoreReader,
     },
 };
@@ -46,6 +44,7 @@ pub struct TxReceiptsManager<
     pub selected_chain_store: Arc<RwLock<T>>,
     pub acceptance_data_store: Arc<X>,
     pub block_transactions_store: Arc<W>,
+    //TODO: remove field
     pub hash_to_pchmr_store: Arc<DbPchmrStore>,
     pub pruning_point_store: Arc<RwLock<Y>>,
 
@@ -238,7 +237,7 @@ impl<
                     // verify the corresponding header is available
                     {
                         //verification of path itself is delegated to the pochm struct
-                        return verify_pchmrs_path(witness, chain_purporter, self.hash_to_pchmr_store.clone());
+                        return witness.verify_path(chain_purporter);
                     }
                 }
                 false
@@ -270,10 +269,6 @@ impl<
 
         create_merkle_witness_from_unsorted(log_sized_parents_list.into_iter(), leaf_block_hash).map_err(|e| e.into())
     }
-    pub fn verify_pchmr_witness(&self, witness: &MerkleWitness, leaf_block_hash: Hash, root_block_hash: Hash) -> bool {
-        verify_merkle_witness(witness, leaf_block_hash, self.hash_to_pchmr_store.get(root_block_hash).unwrap())
-    }
-
     /* the function assumes that the path from block_hash down to its posterity is intact and has not been pruned
     (which should be the same as assuming block_hash has not been pruned)
     it will panic if not.
@@ -633,22 +628,4 @@ impl<
         let candidate_sel_parent_bscore = self.headers_store.get_blue_score(candidate_sel_parent_hash).unwrap();
         candidate_sel_parent_bscore < cutoff_bscore
     }
-}
-
-// this logic should be a method of Pochm in receipts.rs,
-//it is only here currently because pchmr_store is required for it
-// and cannot be accessed easily from receipt.rs
-pub fn verify_pchmrs_path(pochm: &LogPathPochm, destination_block_hash: Hash, pchmr_store: Arc<DbPchmrStore>) -> bool {
-    let leaf_hashes = pochm.vec.iter()
-        .skip(1)//remove first element to match accordingly to witnesses 
-        .map(|pochm_seg| pochm_seg.header.hash)//map to hashes
-        .chain(std::iter::once(destination_block_hash)); // add final block
-
-    /*verify the path from posterity down to chain_purporter:
-    iterate downward from posterity block header: for each, verify that leaf hash is in pchmr of ther header */
-    pochm.vec.iter().zip(leaf_hashes).all(|(pochm_seg, leaf_hash)| {
-        let pchmr_root_hash = pchmr_store.get(pochm_seg.header.hash).unwrap();
-        let witness = &pochm_seg.leaf_in_pchmr_witness;
-        verify_merkle_witness(witness, leaf_hash, pchmr_root_hash)
-    })
 }

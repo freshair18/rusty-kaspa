@@ -15,6 +15,7 @@ pub struct Header {
     pub hash_merkle_root: Hash,
     pub accepted_id_merkle_root: Hash,
     pub utxo_commitment: Hash,
+    pub pochm_merkle_root: Hash,
     /// Timestamp is in milliseconds
     pub timestamp: u64,
     pub bits: u32,
@@ -33,6 +34,7 @@ impl Header {
         hash_merkle_root: Hash,
         accepted_id_merkle_root: Hash,
         utxo_commitment: Hash,
+        pochm_merkle_root: Hash,
         timestamp: u64,
         bits: u32,
         nonce: u64,
@@ -48,6 +50,7 @@ impl Header {
             hash_merkle_root,
             accepted_id_merkle_root,
             utxo_commitment,
+            pochm_merkle_root,
             nonce,
             timestamp,
             daa_score,
@@ -74,14 +77,17 @@ impl Header {
     }
 
     /// WARNING: To be used for test purposes only
+    // note: maybe version should be added as a parameter, for the tests that call
+    //this function currently it don't really matter much what the version is
     pub fn from_precomputed_hash(hash: Hash, parents: Vec<Hash>) -> Header {
         Header {
-            version: crate::constants::BLOCK_VERSION,
+            version: crate::constants::LEGACY_BLOCK_VERSION,
             hash,
             parents_by_level: vec![parents],
             hash_merkle_root: Default::default(),
             accepted_id_merkle_root: Default::default(),
             utxo_commitment: Default::default(),
+            pochm_merkle_root: Default::default(),
             nonce: 0,
             timestamp: 0,
             daa_score: 0,
@@ -116,6 +122,7 @@ mod tests {
         let header = Header::new_finalized(
             1,
             vec![vec![1.into()]],
+            Default::default(),
             Default::default(),
             Default::default(),
             Default::default(),

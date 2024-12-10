@@ -6,7 +6,7 @@ use crate::{
         },
         storage::ConsensusStorage,
     },
-    constants::BLOCK_VERSION,
+    constants::LEGACY_BLOCK_VERSION,
     errors::RuleError,
     model::{
         services::{
@@ -56,6 +56,7 @@ use kaspa_consensus_core::{
     blockstatus::BlockStatus::{StatusDisqualifiedFromChain, StatusUTXOValid},
     coinbase::MinerData,
     config::{genesis::GenesisBlock, params::ForkActivation},
+    constants::TRANSITION_BLOCK_VERSION,
     header::Header,
     merkle::calc_hash_merkle_root,
     pruning::PruningPointsList,
@@ -169,6 +170,7 @@ pub struct VirtualStateProcessor {
 
     // Storage mass hardfork DAA score
     pub(crate) storage_mass_activation: ForkActivation,
+    pub(crate) version_activation: ForkActivation,
 }
 
 impl VirtualStateProcessor {
@@ -234,6 +236,7 @@ impl VirtualStateProcessor {
             notification_root,
             counters,
             storage_mass_activation: params.storage_mass_activation,
+            version_activation: params.block_version_transition_activation,
         }
     }
 
@@ -1031,14 +1034,19 @@ impl VirtualStateProcessor {
             )
             .unwrap();
         txs.insert(0, coinbase.tx);
-        let version = BLOCK_VERSION;
+        let version =
+            if self.version_activation.is_active(virtual_state.daa_score) { TRANSITION_BLOCK_VERSION } else { LEGACY_BLOCK_VERSION };
         let parents_by_level = self.parents_manager.calc_block_parents(pruning_info.pruning_point, &virtual_state.parents);
 
         // Hash according to hardfork activation
         let storage_mass_activated = self.storage_mass_activation.is_active(virtual_state.daa_score);
         let hash_merkle_root = calc_hash_merkle_root(txs.iter(), storage_mass_activated);
-        //temporary
-        let _pchmr_merkle_root = self.tx_receipts_manager.calc_pchmr_root_by_parent(virtual_state.ghostdag_data.selected_parent);
+
+        let pochm_merkle_root = if version == TRANSITION_BLOCK_VERSION {
+            self.tx_receipts_manager.calc_pchmr_root_by_parent(virtual_state.ghostdag_data.selected_parent)
+        } else {
+            Default::default()
+        };
         let accepted_id_merkle_root = calc_merkle_root(virtual_state.accepted_tx_ids.iter().copied());
         let utxo_commitment = virtual_state.multiset.clone().finalize();
         // Past median time is the exclusive lower bound for valid block time, so we increase by 1 to get the valid min
@@ -1049,6 +1057,7 @@ impl VirtualStateProcessor {
             hash_merkle_root,
             accepted_id_merkle_root,
             utxo_commitment,
+            pochm_merkle_root,
             u64::max(min_block_time, unix_now()),
             virtual_state.bits,
             0,

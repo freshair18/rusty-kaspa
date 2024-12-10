@@ -17,6 +17,7 @@ impl From<&Header> for protowire::BlockHeader {
             hash_merkle_root: Some(item.hash_merkle_root.into()),
             accepted_id_merkle_root: Some(item.accepted_id_merkle_root.into()),
             utxo_commitment: Some(item.utxo_commitment.into()),
+            pochm_merkle_root: Some(item.pochm_merkle_root.into()),
             timestamp: item.timestamp.try_into().expect("timestamp is always convertible to i64"),
             bits: item.bits,
             nonce: item.nonce,
@@ -42,12 +43,15 @@ impl From<&Vec<Hash>> for protowire::BlockLevelParents {
 impl TryFrom<protowire::BlockHeader> for Header {
     type Error = ConversionError;
     fn try_from(item: protowire::BlockHeader) -> Result<Self, Self::Error> {
+        let pochm_root = item.pochm_merkle_root;
         Ok(Self::new_finalized(
             item.version.try_into()?,
             item.parents.into_iter().map(Vec::<Hash>::try_from).collect::<Result<Vec<Vec<Hash>>, ConversionError>>()?,
             item.hash_merkle_root.try_into_ex()?,
             item.accepted_id_merkle_root.try_into_ex()?,
             item.utxo_commitment.try_into_ex()?,
+            if pochm_root.is_some()
+            {pochm_root.try_into_ex()?} else {Default::default()},         
             item.timestamp.try_into()?,
             item.bits,
             item.nonce,

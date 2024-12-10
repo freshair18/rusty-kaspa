@@ -29,7 +29,7 @@ impl HeaderProcessor {
     }
 
     fn check_header_version(&self, header: &Header) -> BlockProcessResult<()> {
-        if header.version != constants::BLOCK_VERSION {
+        if header.version != constants::LEGACY_BLOCK_VERSION && header.version != constants::TRANSITION_BLOCK_VERSION {
             return Err(RuleError::WrongBlockVersion(header.version));
         }
         Ok(())

@@ -30,6 +30,7 @@ impl From<&GenesisBlock> for Header {
             genesis.hash_merkle_root,
             ZERO_HASH,
             genesis.utxo_commitment,
+            ZERO_HASH,
             genesis.timestamp,
             genesis.bits,
             genesis.nonce,

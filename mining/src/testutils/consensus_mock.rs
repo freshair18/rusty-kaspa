@@ -6,7 +6,7 @@ use kaspa_consensus_core::{
     },
     block::{BlockTemplate, MutableBlock, TemplateBuildMode, TemplateTransactionSelector, VirtualStateApproxId},
     coinbase::MinerData,
-    constants::BLOCK_VERSION,
+    constants::LEGACY_BLOCK_VERSION,
     errors::{
         block::RuleError,
         coinbase::CoinbaseResult,
@@ -88,9 +88,10 @@ impl ConsensusApi for ConsensusMock {
         let now = unix_now();
         let hash_merkle_root = self.calc_transaction_hash_merkle_root(&txs, 0);
         let header = Header::new_finalized(
-            BLOCK_VERSION,
+            LEGACY_BLOCK_VERSION,
             vec![],
             hash_merkle_root,
+            ZERO_HASH,
             ZERO_HASH,
             ZERO_HASH,
             now,

@@ -28,7 +28,7 @@ use kaspa_consensus_core::block::Block;
 use kaspa_consensus_core::blockhash::new_unique;
 use kaspa_consensus_core::blockstatus::BlockStatus;
 use kaspa_consensus_core::coinbase::MinerData;
-use kaspa_consensus_core::constants::{BLOCK_VERSION, SOMPI_PER_KASPA, STORAGE_MASS_PARAMETER};
+use kaspa_consensus_core::constants::{LEGACY_BLOCK_VERSION, SOMPI_PER_KASPA, STORAGE_MASS_PARAMETER};
 use kaspa_consensus_core::errors::block::{BlockProcessResult, RuleError};
 use kaspa_consensus_core::header::Header;
 use kaspa_consensus_core::network::{NetworkId, NetworkType::Mainnet};
@@ -406,7 +406,7 @@ async fn header_in_isolation_validation_test() {
 
     {
         let mut block = block.clone();
-        let block_version = BLOCK_VERSION - 1;
+        let block_version = LEGACY_BLOCK_VERSION - 1;
         block.header.version = block_version;
         match consensus.validate_and_insert_block(block.to_immutable()).virtual_state_task.await {
             Err(RuleError::WrongBlockVersion(wrong_version)) => {
@@ -714,6 +714,8 @@ struct RPCBlockHeader {
     HashMerkleRoot: String,
     AcceptedIDMerkleRoot: String,
     UTXOCommitment: String,
+    #[serde(default = "default_pochm")]
+    PochmMerkleRoot: String,
     Timestamp: u64,
     Bits: u32,
     Nonce: u64,
@@ -721,6 +723,9 @@ struct RPCBlockHeader {
     BlueScore: u64,
     BlueWork: String,
     PruningPoint: String,
+}
+fn default_pochm() -> String {
+    Hash::default().to_string() // Default is `true` if the field is missing
 }
 
 #[allow(non_snake_case)]
@@ -838,7 +843,7 @@ impl KaspadGoParams {
             storage_mass_parameter: STORAGE_MASS_PARAMETER,
             storage_mass_activation: ForkActivation::never(),
             kip10_activation: ForkActivation::never(),
-            kip6_activation: ForkActivation::never(),
+            block_version_transition_activation: ForkActivation::never(),
             deflationary_phase_daa_score: self.DeflationaryPhaseDaaScore,
             pre_deflationary_phase_base_subsidy: self.PreDeflationaryPhaseBaseSubsidy,
             coinbase_maturity: MAINNET_PARAMS.coinbase_maturity,
@@ -1132,6 +1137,7 @@ fn rpc_header_to_header(rpc_header: &RPCBlockHeader) -> Header {
         Hash::from_str(&rpc_header.HashMerkleRoot).unwrap(),
         Hash::from_str(&rpc_header.AcceptedIDMerkleRoot).unwrap(),
         Hash::from_str(&rpc_header.UTXOCommitment).unwrap(),
+        Hash::from_str(&rpc_header.PochmMerkleRoot).unwrap(),
         rpc_header.Timestamp,
         rpc_header.Bits,
         rpc_header.Nonce,
@@ -1458,6 +1464,8 @@ async fn difficulty_test() {
             hash_merkle_root: 0.into(),
             accepted_id_merkle_root: 0.into(),
             utxo_commitment: 0.into(),
+            pochm_merkle_root: 0.into(),
+
             timestamp: 0,
             bits: 0,
             nonce: 0,

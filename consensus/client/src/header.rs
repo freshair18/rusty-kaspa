@@ -300,6 +300,10 @@ impl TryCastFromJs for Header {
                         .get_value("utxoCommitment")?
                         .try_into_owned()
                         .map_err(|err| Error::convert("utxoCommitment", err))?,
+                    pochm_merkle_root: object
+                        .get_value("pochmMerkleRoot")?
+                        .try_into_owned()
+                        .map_err(|err| Error::convert("pochmMerkleRoot", err))?,
                     nonce: object.get_u64("nonce")?,
                     timestamp: object.get_u64("timestamp")?,
                     daa_score: object.get_u64("daaScore")?,

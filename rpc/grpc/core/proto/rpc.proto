@@ -35,6 +35,8 @@ message RpcBlockHeader {
   string blueWork = 10;
   string pruningPoint = 14;
   uint64 blueScore = 13;
+  string pochmMerkleRoot = 15;
+
 }
 
 message RpcBlockLevelParents {
