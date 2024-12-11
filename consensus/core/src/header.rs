@@ -15,6 +15,8 @@ pub struct Header {
     pub hash_merkle_root: Hash,
     pub accepted_id_merkle_root: Hash,
     pub utxo_commitment: Hash,
+    #[serde(default)]
+    #[borsh(skip)]
     pub pochm_merkle_root: Hash,
     /// Timestamp is in milliseconds
     pub timestamp: u64,

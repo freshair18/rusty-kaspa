@@ -14,6 +14,8 @@ pub struct RpcRawHeader {
     pub hash_merkle_root: Hash,
     pub accepted_id_merkle_root: Hash,
     pub utxo_commitment: Hash,
+    #[serde(default)]
+    #[borsh(skip)]
     pub pochm_merkle_root: Hash,
     /// Timestamp is in milliseconds
     pub timestamp: u64,
@@ -35,6 +37,8 @@ pub struct RpcHeader {
     pub hash_merkle_root: Hash,
     pub accepted_id_merkle_root: Hash,
     pub utxo_commitment: Hash,
+    #[serde(default)]
+    #[borsh(skip)]
     pub pochm_merkle_root: Hash,
     /// Timestamp is in milliseconds
     pub timestamp: u64,
@@ -157,6 +161,10 @@ impl Serializer for RpcHeader {
         store!(Hash, &self.hash_merkle_root, writer)?;
         store!(Hash, &self.accepted_id_merkle_root, writer)?;
         store!(Hash, &self.utxo_commitment, writer)?;
+        if self.version == TRANSITION_BLOCK_VERSION {
+            store!(Hash, &self.pochm_merkle_root, writer)?;
+        }
+
         store!(u64, &self.timestamp, writer)?;
         store!(u32, &self.bits, writer)?;
         store!(u64, &self.nonce, writer)?;
@@ -179,7 +187,7 @@ impl Deserializer for RpcHeader {
         let hash_merkle_root = load!(Hash, reader)?;
         let accepted_id_merkle_root = load!(Hash, reader)?;
         let utxo_commitment = load!(Hash, reader)?;
-        let pochm_merkle_root = if version == TRANSITION_BLOCK_VERSION { load!(Hash, reader)? } else { Default::default() };
+        let pochm_merkle_root =/*  if version == TRANSITION_BLOCK_VERSION { load!(Hash, reader)? } else { */Default::default() ;
 
         let timestamp = load!(u64, reader)?;
         let bits = load!(u32, reader)?;
@@ -321,7 +329,7 @@ impl Deserializer for RpcRawHeader {
         let hash_merkle_root = load!(Hash, reader)?;
         let accepted_id_merkle_root = load!(Hash, reader)?;
         let utxo_commitment = load!(Hash, reader)?;
-        let pochm_merkle_root = if version == TRANSITION_BLOCK_VERSION { load!(Hash, reader)? } else { Default::default() };
+        let pochm_merkle_root =/*  if version == TRANSITION_BLOCK_VERSION { load!(Hash, reader)? } else { */Default::default() ;
         let timestamp = load!(u64, reader)?;
         let bits = load!(u32, reader)?;
         let nonce = load!(u64, reader)?;

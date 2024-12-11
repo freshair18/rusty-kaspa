@@ -50,8 +50,7 @@ impl TryFrom<protowire::BlockHeader> for Header {
             item.hash_merkle_root.try_into_ex()?,
             item.accepted_id_merkle_root.try_into_ex()?,
             item.utxo_commitment.try_into_ex()?,
-            if pochm_root.is_some()
-            {pochm_root.try_into_ex()?} else {Default::default()},         
+            pochm_root.try_into_ex().unwrap_or(Default::default()),
             item.timestamp.try_into()?,
             item.bits,
             item.nonce,
