@@ -60,8 +60,9 @@ impl Flow for IbdFlow {
 
 pub enum IbdType {
     None,
-    Sync(Hash),
+    Sync,
     DownloadHeadersProof,
+    PruningCatchUp,
 }
 
 struct QueueChunkOutput {
@@ -98,17 +99,23 @@ impl IbdFlow {
         let mut session = self.ctx.consensus().session().await;
 
         let negotiation_output = self.negotiate_missing_syncer_chain_segment(&session).await?;
-        let ibd_type =
-            self.determine_ibd_type(&session, &relay_block.header, negotiation_output.highest_known_syncer_chain_hash).await?;
+        let ibd_type = self
+            .determine_ibd_type(
+                &session,
+                &relay_block.header,
+                negotiation_output.highest_known_syncer_chain_hash,
+                negotiation_output.syncer_pruning_point,
+            )
+            .await?;
         match ibd_type {
             IbdType::None => {
                 return Err(ProtocolError::Other("peer has no known block and conditions for requesting headers proof are not met"))
             }
-            IbdType::Sync(highest_known_syncer_chain_hash) => {
+            IbdType::Sync => {
                 self.sync_headers(
                     &session,
                     negotiation_output.syncer_virtual_selected_parent,
-                    highest_known_syncer_chain_hash,
+                    negotiation_output.highest_known_syncer_chain_hash.unwrap(),
                     &relay_block,
                 )
                 .await?;
@@ -133,6 +140,9 @@ impl IbdFlow {
                         return Err(e);
                     }
                 }
+            }
+            IbdType::PruningCatchUp => {
+                unimplemented!();
             }
         }
 
@@ -169,13 +179,28 @@ impl IbdFlow {
         consensus: &ConsensusProxy,
         relay_header: &Header,
         highest_known_syncer_chain_hash: Option<Hash>,
+        syncer_pruning_point: Option<Hash>,
     ) -> Result<IbdType, ProtocolError> {
         if let Some(highest_known_syncer_chain_hash) = highest_known_syncer_chain_hash {
             let pruning_point = consensus.async_pruning_point().await;
             if consensus.async_is_chain_ancestor_of(pruning_point, highest_known_syncer_chain_hash).await? {
-                // The node is only missing a segment in the future of its current pruning point, and the chains
-                // agree as well, so we perform a simple sync IBD and only download the missing data
-                return Ok(IbdType::Sync(highest_known_syncer_chain_hash));
+                let syncer_pruning_point = syncer_pruning_point.unwrap();
+                if syncer_pruning_point == pruning_point {
+                    // The node is only missing a segment in the future of its current pruning point, and the chains
+                    // agree as well, so we perform a simple sync IBD and only download the missing data
+                    return Ok(IbdType::Sync);
+                } else {
+                    // The node is missing a segment in the near future of its current pruning point, but the syncer is ahead
+                    // and already pruned the current pruning point.
+                    if consensus.async_get_block_status(syncer_pruning_point).await.is_some_and(|b| b.has_block_body()) {
+                        // The data pruned by the syncer is already available from within the node (from past ibd attempts)
+                        //can carry on syncing as normal
+                        return Ok(IbdType::Sync);
+                    } else {
+                        //need to partially resync from syncer_pruning_point
+                        return Ok(IbdType::PruningCatchUp);
+                    }
+                }
             }
 
             // If the pruning point is not in the chain of `highest_known_syncer_chain_hash`, it
