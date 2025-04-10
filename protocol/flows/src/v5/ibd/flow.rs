@@ -142,7 +142,15 @@ impl IbdFlow {
                 }
             }
             IbdType::PruningCatchUp => {
-                unimplemented!();
+                self.ibd_catch_up(
+                    &session,
+                    negotiation_output.syncer_virtual_selected_parent,
+                    negotiation_output.syncer_pruning_point.unwrap(),
+                    &relay_block,
+                )
+                .await?;
+                self.ctx.on_pruning_point_utxoset_override();
+                info!("Caught up to new pruning point from {}", self.router);
             }
         }
 
@@ -262,6 +270,36 @@ impl IbdFlow {
         staging_session.async_validate_pruning_points(syncer_virtual_selected_parent).await?;
         self.validate_staging_timestamps(&self.ctx.consensus().session().await, &staging_session).await?;
         self.sync_pruning_point_utxoset(&staging_session, pruning_point).await?;
+        Ok(())
+    }
+
+    async fn ibd_catch_up(
+        &mut self,
+        consensus: &ConsensusProxy,
+        syncer_virtual_selected_parent: Hash,
+        syncer_pruning_point: Hash,
+        relay_block: &Block,
+    ) -> Result<(), ProtocolError> {
+        /* In this IBDtype,  a pruning proof was already verified, and headers in its future downloaded,
+        however the syncer has since pruned, and is no longer able to supply data required for straight forward syncing.
+        The pruning proof was already veriried, and hence all that is needed is to catch up to with missing blocks
+        and recalculate the pruning proof
+        */
+
+        info!("Catching up to near future missing headers with peer{}", self.router);
+
+        // sync forwards from the syncer's pruning point
+        self.sync_headers(consensus, syncer_virtual_selected_parent, syncer_pruning_point, relay_block).await?;
+        consensus.async_get_pruning_point_proof().await; // rebuild a pruning proof
+        let pruning_candidate = consensus.async_pruning_point().await;
+        if pruning_candidate != syncer_pruning_point {
+            //sanity check, might be redundant
+            return Err(ProtocolError::OtherOwned(format!(
+                "mismatch between declared pruning point {} and inferred pruning point {}",
+                syncer_pruning_point, pruning_candidate
+            )));
+        }
+        self.sync_pruning_point_utxoset(consensus, syncer_pruning_point).await?;
         Ok(())
     }
 
@@ -517,10 +555,13 @@ impl IbdFlow {
         consensus: &ConsensusProxy,
         staging_consensus: &ConsensusProxy,
     ) -> Result<(), ProtocolError> {
+        /*This purpose of this check is to prevent the abuse explained here:
+        https://github.com/kaspanet/research/issues/3#issuecomment-895243792
+         */
         let staging_hst = staging_consensus.async_get_header(staging_consensus.async_get_headers_selected_tip().await).await.unwrap();
         let current_hst = consensus.async_get_header(consensus.async_get_headers_selected_tip().await).await.unwrap();
         // If staging is behind current or within 10 minutes ahead of it, then something is wrong and we reject the IBD
-        if staging_hst.timestamp < current_hst.timestamp || staging_hst.timestamp - current_hst.timestamp < 600_000 {
+        if staging_hst.timestamp.saturating_sub(current_hst.timestamp) < 600_000 {
             Err(ProtocolError::OtherOwned(format!(
                 "The difference between the timestamp of the current selected tip ({}) and the 
 staging selected tip ({}) is too small or negative. Aborting IBD...",
