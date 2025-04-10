@@ -130,9 +130,14 @@ impl IbdFlow {
                             "Header download stage of IBD with headers proof completed successfully from {}. Committed staging consensus.",
                             self.router
                         );
-                        self.ctx.on_pruning_point_utxoset_override();
                         // This will reobtain the freshly committed staging consensus
                         session = self.ctx.consensus().session().await;
+                        // following ibd_with_headers_proof up, it is guaranteed that syncer_pruning_point is the same as the node's
+                        //  relying on this saves a call to consensus to derive the pruning point
+
+                        self.sync_pruning_point_utxoset(&session, negotiation_output.syncer_pruning_point.unwrap()).await?;
+
+                        self.ctx.on_pruning_point_utxoset_override();
                     }
                     Err(e) => {
                         info!("IBD with headers proof from {} was unsuccessful ({})", self.router, e);
@@ -149,6 +154,10 @@ impl IbdFlow {
                     &relay_block,
                 )
                 .await?;
+                // following ibd_catch up, it is guaranteed that syncer_pruning_point is the same as the node's
+                //  relying on this saves a call to consensus to derive the pruning point
+
+                self.sync_pruning_point_utxoset(&session, negotiation_output.syncer_pruning_point.unwrap()).await?;
                 self.ctx.on_pruning_point_utxoset_override();
                 info!("Caught up to new pruning point from {}", self.router);
             }
@@ -269,7 +278,6 @@ impl IbdFlow {
         self.sync_headers(&staging_session, syncer_virtual_selected_parent, pruning_point, relay_block).await?;
         staging_session.async_validate_pruning_points(syncer_virtual_selected_parent).await?;
         self.validate_staging_timestamps(&self.ctx.consensus().session().await, &staging_session).await?;
-        self.sync_pruning_point_utxoset(&staging_session, pruning_point).await?;
         Ok(())
     }
 
