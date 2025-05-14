@@ -849,7 +849,11 @@ impl ConsensusApi for Consensus {
     fn import_pruning_points(&self, pruning_points: PruningPointsList) -> PruningImportResult<()> {
         self.services.pruning_proof_manager.import_pruning_points(&pruning_points)
     }
-
+    fn clear_utxo_set(&self) {
+        let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
+        pruning_utxoset_write.set_utxo_unvalidated();
+        pruning_utxoset_write.utxo_set.clear().unwrap();
+    }
     fn append_imported_pruning_point_utxos(&self, utxoset_chunk: &[(TransactionOutpoint, UtxoEntry)], current_multiset: &mut MuHash) {
         let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
         pruning_utxoset_write.utxo_set.write_many(utxoset_chunk).unwrap();
@@ -864,7 +868,18 @@ impl ConsensusApi for Consensus {
 
         current_multiset.combine(&inner_multiset);
     }
-
+    fn set_utxo_validated(&self) {
+        let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
+        pruning_utxoset_write.set_utxo_validated();
+    }
+    fn set_utxo_unvalidated(&self) {
+        let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
+        pruning_utxoset_write.set_utxo_unvalidated();
+    }
+    fn is_utxo_validated(&self) -> bool {
+        let pruning_utxoset_read = self.pruning_utxoset_stores.read();
+        return pruning_utxoset_read.utxo_validated;
+    }
     fn import_pruning_point_utxo_set(&self, new_pruning_point: Hash, imported_utxo_multiset: MuHash) -> PruningImportResult<()> {
         self.virtual_processor.import_pruning_point_utxo_set(new_pruning_point, imported_utxo_multiset)
     }
@@ -927,6 +942,10 @@ impl ConsensusApi for Consensus {
         // PRUNE SAFETY: proof is cached before the prune op begins and the
         // pruning point cannot move during the prune so the cache remains valid
         self.services.pruning_proof_manager.get_pruning_point_proof()
+    }
+    fn manually_update_pruning_point(&self, new_pruning_point: Hash) {
+        let sink_ghostdag_data = self.ghostdag_store.get_data(self.get_sink()).unwrap();
+        self.pruning_processor.manually_update_pruning_point(sink_ghostdag_data.to_compact(), new_pruning_point);
     }
 
     fn create_virtual_selected_chain_block_locator(&self, low: Option<Hash>, high: Option<Hash>) -> ConsensusResult<Vec<Hash>> {

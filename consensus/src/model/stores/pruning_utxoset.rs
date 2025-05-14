@@ -14,6 +14,7 @@ use super::utxo_set::DbUtxoSetStore;
 pub struct PruningUtxosetStores {
     pub utxo_set: DbUtxoSetStore,
     utxoset_position_access: CachedDbItem<Hash>,
+    pub utxo_validated: bool,
 }
 
 impl PruningUtxosetStores {
@@ -21,10 +22,11 @@ impl PruningUtxosetStores {
         Self {
             utxo_set: DbUtxoSetStore::new(db.clone(), utxoset_cache_policy, DatabaseStorePrefixes::PruningUtxoset.into()),
             utxoset_position_access: CachedDbItem::new(db, DatabaseStorePrefixes::PruningUtxosetPosition.into()),
+            utxo_validated: false,
         }
     }
 
-    /// Represents the exact point of the current pruning point utxoset. Used it order to safely
+    /// Represents the exact point of the current pruning point utxoset. Used in order to safely
     /// progress the pruning point utxoset in batches and to allow recovery if the process crashes
     /// during the pruning point utxoset movement
     pub fn utxoset_position(&self) -> StoreResult<Hash> {
@@ -33,5 +35,11 @@ impl PruningUtxosetStores {
 
     pub fn set_utxoset_position(&mut self, batch: &mut WriteBatch, pruning_utxoset_position: Hash) -> StoreResult<()> {
         self.utxoset_position_access.write(BatchDbWriter::new(batch), &pruning_utxoset_position)
+    }
+    pub fn set_utxo_validated(&mut self) {
+        self.utxo_validated = true;
+    }
+    pub fn set_utxo_unvalidated(&mut self) {
+        self.utxo_validated = false;
     }
 }

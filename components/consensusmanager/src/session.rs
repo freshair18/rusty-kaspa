@@ -340,6 +340,9 @@ impl ConsensusSessionOwned {
     pub async fn async_get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
         self.clone().spawn_blocking(|c| c.get_pruning_point_proof()).await
     }
+    pub async fn manually_update_pruning_point(&self, new_pruning: Hash) {
+        self.clone().spawn_blocking(move |c| c.manually_update_pruning_point(new_pruning)).await
+    }
 
     pub async fn async_create_virtual_selected_chain_block_locator(
         &self,
@@ -454,6 +457,18 @@ impl ConsensusSessionOwned {
 
     pub async fn async_finality_point(&self) -> Hash {
         self.clone().spawn_blocking(move |c| c.finality_point()).await
+    }
+    pub async fn async_clear_utxo_set(&self) {
+        self.clone().spawn_blocking(move |c| c.clear_utxo_set()).await
+    }
+    pub async fn async_is_utxo_validated(&self) -> bool {
+        self.clone().spawn_blocking(move |c| c.is_utxo_validated()).await
+    }
+    pub async fn set_utxo_unvalidated(&self) {
+        self.clone().spawn_blocking(move |c| c.set_utxo_unvalidated()).await
+    }
+    pub async fn set_utxo_validated(&self) {
+        self.clone().spawn_blocking(move |c| c.set_utxo_validated()).await
     }
 }
 

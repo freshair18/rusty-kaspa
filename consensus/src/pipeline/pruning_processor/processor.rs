@@ -166,7 +166,49 @@ impl PruningProcessor {
             self.prune(pruning_point, retention_period_root);
         }
     }
+    pub fn manually_update_pruning_point(&self, sink_ghostdag_data: CompactGhostdagData, new_pruning_point: Hash) {
+        /* Function is very similar to advance_pruning_point_and_candidate_if_possible, consider refactoring at some point*/
+        let pruning_point_read = self.pruning_point_store.upgradable_read();
+        let current_pruning_info = pruning_point_read.get().unwrap();
+        let (new_pruning_points, _) = self.pruning_point_manager.next_pruning_points(
+            sink_ghostdag_data,
+            current_pruning_info.candidate,
+            current_pruning_info.pruning_point,
+        );
 
+        let retention_period_root = pruning_point_read.retention_period_root().unwrap();
+
+        // Update past pruning points and pruning point stores
+        let mut length_until_new_pp = 0;
+        let mut batch = WriteBatch::default();
+        let mut pruning_point_write = RwLockUpgradableReadGuard::upgrade(pruning_point_read);
+        for (i, past_pp) in new_pruning_points.iter().copied().enumerate() {
+            length_until_new_pp += 1;
+            self.past_pruning_points_store.insert_batch(&mut batch, current_pruning_info.index + i as u64 + 1, past_pp).unwrap();
+            if past_pp == new_pruning_point {
+                break;
+            }
+        }
+        let new_pp_index = current_pruning_info.index + length_until_new_pp as u64;
+        pruning_point_write.set_batch(&mut batch, new_pruning_point, new_pruning_point, new_pp_index).unwrap();
+
+        // For archival nodes, keep the retention root in place
+        let adjusted_retention_period_root = if self.config.is_archival {
+            retention_period_root
+        } else {
+            let adjusted_retention_period_root = self.advance_retention_period_root(retention_period_root, new_pruning_point);
+            pruning_point_write.set_retention_period_root(&mut batch, adjusted_retention_period_root).unwrap();
+            adjusted_retention_period_root
+        };
+
+        self.db.write(batch).unwrap();
+        drop(pruning_point_write);
+
+        trace!("New Pruning Point: {} | New Retention Period Root: {}", new_pruning_point, adjusted_retention_period_root);
+
+        // Inform the user
+        info!("Sync catch-up pruning movement: advancing from {} to {}", current_pruning_info.pruning_point, new_pruning_point);
+    }
     fn advance_pruning_point_and_candidate_if_possible(&self, sink_ghostdag_data: CompactGhostdagData) {
         let pruning_point_read = self.pruning_point_store.upgradable_read();
         let current_pruning_info = pruning_point_read.get().unwrap();
