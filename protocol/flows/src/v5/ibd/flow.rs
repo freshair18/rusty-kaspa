@@ -106,6 +106,14 @@ impl IbdFlow {
                 negotiation_output.syncer_pruning_point,
             )
             .await?;
+        /* A pruning point can be "finalized" into consensus if
+        1) it satisfies that Min(P| P.B>Nf) for some integer N (i.e. it is a valid pruning point based on score)
+        2) it underwent through "trusted" validation of its body, perhaps including many other blocks from its anticone etc.
+        3)there are sufficient headers built on top of it, specifically, a header is validated whose blue_score is greater than P.B+p
+        4) The consensus knows a pruning proof for it
+        4) the consensus knows a utxo set that matches its utxo commitment.
+        5)
+        */
         match ibd_type {
             IbdType::None => {
                 return Err(ProtocolError::Other("peer has no known block and conditions for requesting headers proof are not met"))
@@ -165,16 +173,35 @@ impl IbdFlow {
                  Or possibly more, or possibly all of the above.
                 Alternatively, copy the consensus and consider it a staging consensus
                 */
-                match self.ibd_catch_up(&session, syncer_pruning_point).await {
+                let mut pre_synced=false;
+                if ! session.async_is_valid_pruning_point_from_tip(syncer_pruning_point).await
+                {
+                    info!("Syncer pruning point is not sufficiently deep  currently, downloading more headers");
+                    self.sync_headers(
+
+                        &session,
+                        negotiation_output.syncer_virtual_selected_parent,
+                        negotiation_output.highest_known_syncer_chain_hash.unwrap(),
+                        &relay_block,
+                    )
+                    .await?;
+                    pre_synced=true
+                }
+                match self.ibd_catch_up(&session, syncer_pruning_point,     negotiation_output.syncer_virtual_selected_parent,
+                    &relay_block,).await {
                     Ok(()) => {
+                  
                         self.sync_new_utxo_set(&session, syncer_pruning_point).await?;
+                        if ! pre_synced{
                         self.sync_headers(
+
                             &session,
                             negotiation_output.syncer_virtual_selected_parent,
                             negotiation_output.highest_known_syncer_chain_hash.unwrap(),
                             &relay_block,
                         )
                         .await?;
+                        }
                     }
                     Err(e) => {
                         info!("IBD catch up {} was unsuccessful ({})", self.router, e);
@@ -232,6 +259,11 @@ impl IbdFlow {
                     // agree as well, so we perform a simple sync IBD and only download the missing data
                     return Ok(IbdType::Sync);
                 } else {
+                    if ! consensus.async_is_pruning_sample(syncer_pruning_point).await
+                    {
+                        // this is not a pruning point, no point in comtinuing mallicious IBD
+                        return Ok(IbdType::None);
+                    }
                     // The node is missing a segment in the near future of its current pruning point, but the syncer is ahead
                     // and already pruned the current pruning point.
                     if consensus.async_get_block_status(syncer_pruning_point).await.is_some_and(|b| b.has_block_body()) {
@@ -320,11 +352,11 @@ impl IbdFlow {
         self.sync_headers(&staging_session, syncer_virtual_selected_parent, pruning_point, relay_block).await?;
         staging_session.async_validate_pruning_points(syncer_virtual_selected_parent).await?;
         self.validate_staging_timestamps(&self.ctx.consensus().session().await, &staging_session).await?;
-        self.sync_pruning_point_utxoset(&staging_session, pruning_point).await?;
         Ok(())
     }
 
-    async fn ibd_catch_up(&mut self, consensus: &ConsensusProxy, syncer_pruning_point: Hash) -> Result<(), ProtocolError> {
+    async fn ibd_catch_up(&mut self, consensus: &ConsensusProxy, syncer_pruning_point: Hash,     syncer_virtual_selected_parent: Hash,
+        relay_block: &Block) -> Result<(), ProtocolError> {
         /* In this IBDtype,  a pruning proof was already verified, and headers in its future downloaded,
         however the syncer has since pruned, and is no longer able to supply data required for straight forward syncing.
         The pruning proof was already veriried, and hence all that is needed is to catch up to with missing blocks
@@ -332,51 +364,55 @@ impl IbdFlow {
         */
         //no designated flow exists in the current version, there is no choice but to initiate a pruning
         // sync forwards from the syncer's pruning point
-        self.router
-            .enqueue(make_message!(Payload::RequestPruningPointAndItsAnticone, RequestPruningPointAndItsAnticoneMessage {}))
-            .await?;
-        //drop unnecessary syncer sends
-        dequeue_with_timeout!(self.incoming_route, Payload::PruningPoints)?;
+        let pruning_point = self.sync_and_validate_pruning_proof(&consensus, relay_block).await?;
+        // consensus.async_validate_pruning_points(syncer_virtual_selected_parent).await?;
 
-        let msg = dequeue_with_timeout!(self.incoming_route, Payload::TrustedData)?;
-        let pkg: TrustedDataPackage = msg.try_into()?;
-        debug!("received trusted data with {} daa entries and {} ghostdag entries", pkg.daa_window.len(), pkg.ghostdag_window.len());
 
-        let mut entry_stream = TrustedEntryStream::new(&self.router, &mut self.incoming_route);
-        let Some(pruning_point_entry) = entry_stream.next().await? else {
-            return Err(ProtocolError::Other("got `done` message before receiving the pruning point"));
-        };
-        // if pruning_point_entry.block.header.daa_score< staging_session.async_get_header(staging_session.async_pruning_point().await).await?.daa_score{
-        //     return Err(ProtocolError::Other("Catch up pruning point is in the past of current pruning point "));
+        // self.router
+        //     .enqueue(make_message!(Payload::RequestPruningPointAndItsAnticone, RequestPruningPointAndItsAnticoneMessage {}))
+        //     .await?;
+        // //drop unnecessary syncer sends
+        // dequeue_with_timeout!(self.incoming_route, Payload::PruningPoints)?;
 
+        // let msg = dequeue_with_timeout!(self.incoming_route, Payload::TrustedData)?;
+        // let pkg: TrustedDataPackage = msg.try_into()?;
+        // debug!("received trusted data with {} daa entries and {} ghostdag entries", pkg.daa_window.len(), pkg.ghostdag_window.len());
+
+        // let mut entry_stream = TrustedEntryStream::new(&self.router, &mut self.incoming_route);
+        // let Some(pruning_point_entry) = entry_stream.next().await? else {
+        //     return Err(ProtocolError::Other("got `done` message before receiving the pruning point"));
+        // };
+        // // if pruning_point_entry.block.header.daa_score< staging_session.async_get_header(staging_session.async_pruning_point().await).await?.daa_score{
+        // //     return Err(ProtocolError::Other("Catch up pruning point is in the past of current pruning point "));
+
+        // // }
+
+        // let mut entries = vec![pruning_point_entry];
+        // while let Some(entry) = entry_stream.next().await? {
+        //     entries.push(entry);
         // }
 
-        let mut entries = vec![pruning_point_entry];
-        while let Some(entry) = entry_stream.next().await? {
-            entries.push(entry);
-        }
+        // let trusted_set = pkg.build_trusted_subdag(entries)?;
 
-        let trusted_set = pkg.build_trusted_subdag(entries)?;
+        // // TODO (relaxed): add logs to staging commit process
 
-        // TODO (relaxed): add logs to staging commit process
-
-        info!("Starting to process {} trusted blocks", trusted_set.len());
-        let mut last_time = Instant::now();
-        let mut last_index: usize = 0;
-        for (i, tb) in trusted_set.into_iter().enumerate() {
-            let now = Instant::now();
-            let passed = now.duration_since(last_time);
-            if passed > Duration::from_secs(1) {
-                info!("Processed {} trusted blocks in the last {:.2}s (total {})", i - last_index, passed.as_secs_f64(), i);
-                last_time = now;
-                last_index = i;
-            }
-            // TODO (relaxed): queue and join in batches
-            consensus.validate_and_insert_trusted_block(tb).virtual_state_task.await?;
-        }
-        info!("Done processing trusted blocks");
-        consensus.manually_update_pruning_point(syncer_pruning_point).await;
-        consensus.async_get_pruning_point_proof().await; // rebuild a pruning proof
+        // info!("Starting to process {} trusted blocks", trusted_set.len());
+        // let mut last_time = Instant::now();
+        // let mut last_index: usize = 0;
+        // for (i, tb) in trusted_set.into_iter().enumerate() {
+        //     let now = Instant::now();
+        //     let passed = now.duration_since(last_time);
+        //     if passed > Duration::from_secs(1) {
+        //         info!("Processed {} trusted blocks in the last {:.2}s (total {})", i - last_index, passed.as_secs_f64(), i);
+        //         last_time = now;
+        //         last_index = i;
+        //     }
+        //     // TODO (relaxed): queue and join in batches
+        //     consensus.validate_and_insert_trusted_block(tb).virtual_state_task.await?;
+        // }
+        // info!("Done processing trusted blocks");
+        // consensus.manually_update_pruning_point(syncer_pruning_point).await;
+        // consensus.async_get_pruning_point_proof(syncer_pruning_point).await; // rebuild a pruning proof
         let pruning_candidate = consensus.async_pruning_point().await;
         if pruning_candidate != syncer_pruning_point {
             //sanity check
@@ -470,9 +506,8 @@ impl IbdFlow {
                     let ref_proof = proof.clone();
                     c.apply_pruning_proof(proof, &trusted_set)?;
                     c.import_pruning_points(pruning_points)?;
-
                     info!("Building the proof which was just applied (sanity test)");
-                    let built_proof = c.get_pruning_point_proof();
+                    let built_proof = c.get_pruning_point_proof(proof_pruning_point);
                     let mut mismatch_detected = false;
                     for (i, (ref_level, built_level)) in ref_proof.iter().zip(built_proof.iter()).enumerate() {
                         if ref_level.iter().map(|h| h.hash).collect::<BlockHashSet>()
@@ -566,6 +601,7 @@ impl IbdFlow {
                     .collect();
                 let prev_chunk_len = prev_jobs.len();
                 // Join the previous chunk so that we always concurrently process a chunk and receive another
+                info!("prev_jobs_len:{}",prev_chunk_len);
                 try_join_all(prev_jobs).await?;
                 // Log the progress
                 progress_reporter.report(prev_chunk_len, prev_daa_score, prev_timestamp);
@@ -575,6 +611,7 @@ impl IbdFlow {
             }
 
             let prev_chunk_len = prev_jobs.len();
+            info!("prev_jobs_len:{}",prev_chunk_len);
             try_join_all(prev_jobs).await?;
             progress_reporter.report_completion(prev_chunk_len);
         }

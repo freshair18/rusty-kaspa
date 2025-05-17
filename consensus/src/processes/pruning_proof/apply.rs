@@ -14,6 +14,7 @@ use kaspa_consensus_core::{
     BlockHashMap, BlockHashSet, BlockLevel, HashMapCustomHasher,
 };
 use kaspa_core::{debug, trace};
+use kaspa_database::prelude::StoreResultEmptyTuple;
 use kaspa_hashes::Hash;
 use kaspa_pow::calc_block_level;
 use kaspa_utils::{binary_heap::BinaryHeapExtensions, vec::VecExtensions};
@@ -42,6 +43,7 @@ use super::PruningProofManager;
 
 impl PruningProofManager {
     pub fn apply_proof(&self, mut proof: PruningPointProof, trusted_set: &[TrustedBlock]) -> PruningImportResult<()> {
+        /* Following validation of a pruning proof, various consensus storages must be updated */
         let pruning_point_header = proof[0].last().unwrap().clone();
         let pruning_point = pruning_point_header.hash;
 
@@ -50,6 +52,8 @@ impl PruningProofManager {
             .map(|level| BlockHashSet::from_iter(proof[level as usize].iter().map(|header| header.hash)))
             .collect_vec();
 
+        //calculate ghostdag data for each block in the trusted set
+        // expand the proof with the hashes of trusted set
         let mut trusted_gd_map: BlockHashMap<GhostdagData> = BlockHashMap::new();
         for tb in trusted_set.iter() {
             trusted_gd_map.insert(tb.block.hash(), tb.ghostdag.clone().into());
@@ -60,17 +64,18 @@ impl PruningProofManager {
                 if proof_sets[current_proof_level as usize].contains(&tb.block.hash()) {
                     return;
                 }
-
+                // otherwise, add this block to the proof data
                 proof[current_proof_level as usize].push(tb.block.header.clone());
             });
         }
-
+        //topologically sort every level in the proof
         proof.iter_mut().for_each(|level_proof| {
             level_proof.sort_by(|a, b| a.blue_work.cmp(&b.blue_work));
         });
 
         self.populate_reachability_and_headers(&proof);
 
+        //sanity check
         {
             let reachability_read = self.reachability_store.read();
             for tb in trusted_set.iter() {
@@ -80,12 +85,16 @@ impl PruningProofManager {
                 }
             }
         }
-
+        //populate ghostdag_store and relation store (on a per level basis) for every block in the proof
         for (level, headers) in proof.iter().enumerate() {
             trace!("Applying level {} from the pruning point proof", level);
+            /* we are only interested in those level ancestors that belong to the pruning proof at that level,
+            so other level parents are filtered out
+            Since each level is topologically sorted, we can construct the level ancesstors 
+            on the fly rather than constructing it ahead of time
+             */
             let mut level_ancestors: HashSet<Hash> = HashSet::new();
             level_ancestors.insert(ORIGIN);
-
             for header in headers.iter() {
                 let parents = Arc::new(
                     self.parents_manager
@@ -97,7 +106,7 @@ impl PruningProofManager {
                         .push_if_empty(ORIGIN),
                 );
 
-                self.relations_stores.write()[level].insert(header.hash, parents.clone()).unwrap();
+                self.relations_stores.write()[level].insert(header.hash, parents.clone()).unwrap_or_exists();
 
                 if level == 0 {
                     let gd = if let Some(gd) = trusted_gd_map.get(&header.hash) {
@@ -114,29 +123,31 @@ impl PruningProofManager {
                             blues_anticone_sizes: calculated_gd.blues_anticone_sizes,
                         }
                     };
-                    self.ghostdag_store.insert(header.hash, Arc::new(gd)).unwrap();
+                    self.ghostdag_store.insert(header.hash, Arc::new(gd)).unwrap_or_exists();
                 }
 
                 level_ancestors.insert(header.hash);
             }
         }
-
+        //update virtual state based on proof derived pruning point
+        // updating of the utxoset is done separately as it requires downloading the new utxoset in its entirety.
         let virtual_parents = vec![pruning_point];
         let virtual_state = Arc::new(VirtualState {
             parents: virtual_parents.clone(),
             ghostdag_data: self.ghostdag_manager.ghostdag(&virtual_parents),
             ..VirtualState::default()
         });
-        self.virtual_stores.write().state.set(virtual_state).unwrap();
+        self.virtual_stores.write().state.set(virtual_state).unwrap_or_exists();
 
         let mut batch = WriteBatch::default();
-        self.body_tips_store.write().init_batch(&mut batch, &virtual_parents).unwrap();
+        //
+        self.body_tips_store.write().init_batch(&mut batch, &virtual_parents).unwrap_or_exists();
         self.headers_selected_tip_store
             .write()
             .set_batch(&mut batch, SortableBlock { hash: pruning_point, blue_work: pruning_point_header.blue_work })
-            .unwrap();
-        self.selected_chain_store.write().init_with_pruning_point(&mut batch, pruning_point).unwrap();
-        self.depth_store.insert_batch(&mut batch, pruning_point, ORIGIN, ORIGIN).unwrap();
+            .unwrap_or_exists();
+        self.selected_chain_store.write().init_with_pruning_point(&mut batch, pruning_point).unwrap_or_exists();
+        self.depth_store.insert_batch(&mut batch, pruning_point, ORIGIN, ORIGIN).unwrap_or_exists();
         self.db.write(batch).unwrap();
 
         Ok(())
@@ -150,7 +161,7 @@ impl PruningProofManager {
             if let Vacant(e) = dag.entry(header.hash) {
                 // pow passing has already been checked during validation
                 let block_level = calc_block_level(&header, self.max_block_level);
-                self.headers_store.insert(header.hash, header.clone(), block_level).unwrap();
+                self.headers_store.insert(header.hash, header.clone(), block_level).unwrap_or_exists();// danger: is there a reason this would be unsound?
 
                 let mut parents = BlockHashSet::with_capacity(header.direct_parents().len() * 2);
                 // We collect all available parent relations in order to maximize reachability information.
@@ -212,18 +223,19 @@ impl PruningProofManager {
             let mut staging_reachability_relations = StagingRelationsStore::new(&mut reachability_relations_write);
 
             // Stage
-            staging_reachability_relations.insert(hash, reachability_parents_hashes.clone()).unwrap();
+            staging_reachability_relations.insert(hash, reachability_parents_hashes.clone()).unwrap_or_exists();
             let mergeset = unordered_mergeset_without_selected_parent(
                 &staging_reachability_relations,
                 &staging_reachability,
                 selected_parent,
                 &reachability_parents_hashes,
             );
-            reachability::add_block(&mut staging_reachability, hash, selected_parent, &mut mergeset.iter().copied()).unwrap();
+            if !staging_reachability.has_reachability_data(hash)
+                {reachability::add_block(&mut staging_reachability, hash, selected_parent, &mut mergeset.iter().copied()).unwrap()};
 
             // Commit
-            let reachability_write = staging_reachability.commit(&mut batch).unwrap();
-            staging_reachability_relations.commit(&mut batch).unwrap();
+            let reachability_write = staging_reachability.commit(&mut batch);
+            staging_reachability_relations.commit(&mut batch).unwrap_or_exists();
 
             // Write
             self.db.write(batch).unwrap();

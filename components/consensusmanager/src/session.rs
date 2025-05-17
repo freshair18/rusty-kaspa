@@ -337,8 +337,8 @@ impl ConsensusSessionOwned {
         self.clone().spawn_blocking(move |c| c.get_anticone(hash)).await
     }
 
-    pub async fn async_get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
-        self.clone().spawn_blocking(|c| c.get_pruning_point_proof()).await
+    pub async fn async_get_pruning_point_proof(&self,queried_pp:Hash) -> Arc<PruningPointProof> {
+        self.clone().spawn_blocking(move |c| c.get_pruning_point_proof(queried_pp)).await
     }
     pub async fn manually_update_pruning_point(&self, new_pruning: Hash) {
         self.clone().spawn_blocking(move |c| c.manually_update_pruning_point(new_pruning)).await
@@ -469,6 +469,12 @@ impl ConsensusSessionOwned {
     }
     pub async fn set_utxo_validated(&self) {
         self.clone().spawn_blocking(move |c| c.set_utxo_validated()).await
+    }
+    pub async fn async_is_pruning_sample(&self,candidate_hash:Hash)->bool {
+        self.clone().spawn_blocking(move |c| c.is_pruning_sample(candidate_hash)).await
+    }
+    pub async fn async_is_valid_pruning_point_from_tip(&self,candidate_hash:Hash)->bool {
+        self.clone().spawn_blocking(move |c| c.is_valid_pruning_point_from_tip(candidate_hash)).await
     }
 }
 

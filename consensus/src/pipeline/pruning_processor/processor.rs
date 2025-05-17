@@ -302,8 +302,7 @@ impl PruningProcessor {
         }
 
         info!("Header and Block pruning: preparing proof and anticone data...");
-
-        let proof = self.pruning_proof_manager.get_pruning_point_proof();
+        let proof = self.pruning_proof_manager.get_pruning_point_proof(new_pruning_point);
         let data = self
             .pruning_proof_manager
             .get_pruning_point_anticone_and_trusted_data()

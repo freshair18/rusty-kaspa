@@ -22,7 +22,7 @@ impl PruningUtxosetStores {
         Self {
             utxo_set: DbUtxoSetStore::new(db.clone(), utxoset_cache_policy, DatabaseStorePrefixes::PruningUtxoset.into()),
             utxoset_position_access: CachedDbItem::new(db, DatabaseStorePrefixes::PruningUtxosetPosition.into()),
-            utxo_validated: false,
+            utxo_validated: true,// to be fixed
         }
     }
 

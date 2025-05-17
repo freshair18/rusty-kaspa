@@ -58,7 +58,8 @@ impl PruningProofManager {
         // Get the proof for the current consensus and recreate the stores for it
         // This is expected to be fast because if a proof exists, it will be cached.
         // If no proof exists, this is empty
-        let mut current_consensus_proof = self.get_pruning_point_proof();
+        let curr_pp=self.pruning_point_store.read().pruning_point().unwrap();
+        let mut current_consensus_proof = self.get_pruning_point_proof(curr_pp);
         if current_consensus_proof.is_empty() {
             // An empty proof can only happen if we're at genesis. We're going to create a proof for this case that contains the genesis header only
             let genesis_header = self.headers_store.get_header(self.genesis_hash).unwrap();
@@ -289,7 +290,7 @@ impl PruningProofManager {
                     return Err(PruningImportError::PruningProofDuplicateHeaderAtLevel(header.hash, level));
                 }
 
-                relations_stores[level_idx].insert(header.hash, parents.clone()).unwrap();
+                relations_stores[level_idx].insert(header.hash, parents.clone()).unwrap_or_exists();
                 let ghostdag_data = Arc::new(ghostdag_managers[level_idx].ghostdag(&parents));
                 ghostdag_stores[level_idx].insert(header.hash, ghostdag_data.clone()).unwrap();
                 selected_tip = Some(match selected_tip {

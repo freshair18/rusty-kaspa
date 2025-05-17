@@ -27,7 +27,7 @@ use kaspa_consensus_core::{
     BlockHashMap, BlockHashSet, BlockLevel, HashMapCustomHasher, KType,
 };
 use kaspa_core::info;
-use kaspa_database::{prelude::StoreResultExtensions, utils::DbLifetime};
+use kaspa_database::{prelude::{StoreResultEmptyTuple, StoreResultExtensions}, utils::DbLifetime};
 use kaspa_hashes::Hash;
 use kaspa_pow::calc_block_level;
 use thiserror::Error;
@@ -195,7 +195,7 @@ impl PruningProofManager {
             return Err(PruningImportError::DuplicatedPastPruningPoints(pruning_points.len() - unique_count));
         }
         for (i, header) in pruning_points.iter().enumerate() {
-            self.past_pruning_points_store.set(i as u64, header.hash).unwrap();
+            self.past_pruning_points_store.set(i as u64, header.hash).unwrap_or_exists();
 
             if i > 0 {
                 let prev_blue_score = pruning_points[i - 1].blue_score;
@@ -207,7 +207,7 @@ impl PruningProofManager {
                 // Store the i-1 pruning point as the last pruning sample from POV of the i'th pruning point.
                 // If this data is inconsistent, then blocks above the pruning point will fail the expected
                 // pruning point validation performed at are_pruning_points_in_valid_chain
-                self.pruning_samples_store.insert(header.hash, pruning_points[i - 1].hash).unwrap();
+                self.pruning_samples_store.insert(header.hash, pruning_points[i - 1].hash).unwrap_or_exists();
             }
 
             if self.headers_store.has(header.hash).unwrap() {
@@ -215,7 +215,7 @@ impl PruningProofManager {
             }
 
             let block_level = calc_block_level(header, self.max_block_level);
-            self.headers_store.insert(header.hash, header.clone(), block_level).unwrap();
+            self.headers_store.insert(header.hash, header.clone(), block_level).unwrap();// perhaps can be replaced with unwrap_or_exists?
         }
 
         let new_pruning_point = pruning_points.last().unwrap().hash;
@@ -223,9 +223,9 @@ impl PruningProofManager {
 
         let mut pruning_point_write = self.pruning_point_store.write();
         let mut batch = WriteBatch::default();
-        pruning_point_write.set_batch(&mut batch, new_pruning_point, new_pruning_point, (pruning_points.len() - 1) as u64).unwrap();
-        pruning_point_write.set_retention_checkpoint(&mut batch, new_pruning_point).unwrap();
-        pruning_point_write.set_retention_period_root(&mut batch, new_pruning_point).unwrap();
+        pruning_point_write.set_batch(&mut batch, new_pruning_point, new_pruning_point, (pruning_points.len() - 1) as u64).unwrap_or_exists();
+        pruning_point_write.set_retention_checkpoint(&mut batch, new_pruning_point).unwrap_or_exists();
+        pruning_point_write.set_retention_period_root(&mut batch, new_pruning_point).unwrap_or_exists();
         self.db.write(batch).unwrap();
         drop(pruning_point_write);
 
@@ -375,21 +375,20 @@ impl PruningProofManager {
         }
     }
 
-    pub fn get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
-        let pp = self.pruning_point_store.read().pruning_point().unwrap();
+    pub fn get_pruning_point_proof(&self, queried_pp: Hash) -> Arc<PruningPointProof> {
         let mut cache_lock = self.cached_proof.lock();
         if let Some(cache) = cache_lock.clone() {
-            if cache.pruning_point == pp {
+            if cache.pruning_point == queried_pp {
                 return cache.data;
             }
         }
-        let proof = Arc::new(self.build_pruning_point_proof(pp));
+        let proof = Arc::new(self.build_pruning_point_proof(queried_pp));
         info!(
             "Built headers proof with overall {} headers ({} unique)",
             proof.iter().map(|l| l.len()).sum::<usize>(),
             proof.iter().flatten().unique_by(|h| h.hash).count()
         );
-        cache_lock.replace(CachedPruningPointData { pruning_point: pp, data: proof.clone() });
+        cache_lock.replace(CachedPruningPointData { pruning_point: queried_pp, data: proof.clone() });
         proof
     }
 

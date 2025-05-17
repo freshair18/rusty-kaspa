@@ -854,6 +854,21 @@ impl ConsensusApi for Consensus {
         pruning_utxoset_write.set_utxo_unvalidated();
         pruning_utxoset_write.utxo_set.clear().unwrap();
     }
+    fn is_pruning_sample(&self, candidate_hash:Hash)-> bool
+    {
+        if let Ok(candidate_hdr)=self.get_header(candidate_hash){
+            let candidate_bscore=candidate_hdr.blue_score;
+            let parent_bscore=self.get_header(candidate_hdr.direct_parents()[0]).unwrap().blue_score;
+            return self.services.pruning_point_manager.is_pruning_sample(candidate_bscore,parent_bscore ,self.config.params.finality_depth().after())
+        }
+        false
+    }
+    fn is_valid_pruning_point_from_tip(&self, pruning_candidate:Hash)-> bool
+    {
+        let hst = self.storage.headers_selected_tip_store.read().get().unwrap().hash;
+
+        self.services.pruning_point_manager.is_valid_pruning_point(pruning_candidate, hst)
+    }
     fn append_imported_pruning_point_utxos(&self, utxoset_chunk: &[(TransactionOutpoint, UtxoEntry)], current_multiset: &mut MuHash) {
         let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
         pruning_utxoset_write.utxo_set.write_many(utxoset_chunk).unwrap();
@@ -885,17 +900,19 @@ impl ConsensusApi for Consensus {
     }
 
     fn validate_pruning_points(&self, syncer_virtual_selected_parent: Hash) -> ConsensusResult<()> {
-        let hst = self.storage.headers_selected_tip_store.read().get().unwrap().hash;
         let pp_info = self.pruning_point_store.read().get().unwrap();
-        if !self.services.pruning_point_manager.is_valid_pruning_point(pp_info.pruning_point, hst) {
+        if ! self.is_valid_pruning_point_from_tip(pp_info.pruning_point) {
             return Err(ConsensusError::General("pruning point does not coincide with the synced header selected tip"));
         }
-        if !self.services.pruning_point_manager.is_valid_pruning_point(pp_info.pruning_point, syncer_virtual_selected_parent) {
-            return Err(ConsensusError::General("pruning point does not coincide with the syncer's sink (virtual selected parent)"));
-        }
+
+        // return later
+
+        // if !self.services.pruning_point_manager.is_valid_pruning_point(pp_info.pruning_point, syncer_virtual_selected_parent) {
+        //     return Err(ConsensusError::General("pruning point does not coincide with the syncer's sink (virtual selected parent)"));
+        // }
         self.services
             .pruning_point_manager
-            .are_pruning_points_in_valid_chain(pp_info, syncer_virtual_selected_parent)
+            .are_pruning_points_in_valid_chain(pp_info)
             .map_err(|e| ConsensusError::GeneralOwned(format!("past pruning points do not form a valid chain: {}", e)))
     }
 
@@ -938,10 +955,10 @@ impl ConsensusApi for Consensus {
         Ok(self.services.dag_traversal_manager.anticone(hash, virtual_state.parents.iter().copied(), None)?)
     }
 
-    fn get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
+    fn get_pruning_point_proof(&self, queried_pp:Hash) -> Arc<PruningPointProof> {
         // PRUNE SAFETY: proof is cached before the prune op begins and the
         // pruning point cannot move during the prune so the cache remains valid
-        self.services.pruning_proof_manager.get_pruning_point_proof()
+        self.services.pruning_proof_manager.get_pruning_point_proof(queried_pp)
     }
     fn manually_update_pruning_point(&self, new_pruning_point: Hash) {
         let sink_ghostdag_data = self.ghostdag_store.get_data(self.get_sink()).unwrap();
@@ -1156,4 +1173,5 @@ impl ConsensusApi for Consensus {
     fn finality_point(&self) -> Hash {
         self.virtual_processor.virtual_finality_point(&self.lkg_virtual_state.load().ghostdag_data, self.pruning_point())
     }
+
 }

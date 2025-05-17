@@ -231,6 +231,14 @@ pub trait ConsensusApi: Send + Sync {
     fn is_utxo_validated(&self) -> bool {
         unimplemented!()
     }
+    fn is_pruning_sample(& self, candidate_hash:Hash) ->bool
+    {
+        unimplemented!()
+    }
+    fn is_valid_pruning_point_from_tip(& self, candidate_hash:Hash) ->bool
+    {
+        unimplemented!()
+    }
 
     fn append_imported_pruning_point_utxos(&self, utxoset_chunk: &[(TransactionOutpoint, UtxoEntry)], current_multiset: &mut MuHash) {
         unimplemented!()
@@ -268,7 +276,7 @@ pub trait ConsensusApi: Send + Sync {
         unimplemented!()
     }
 
-    fn get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
+    fn get_pruning_point_proof(&self,queried_pp:Hash) -> Arc<PruningPointProof> {
         unimplemented!()
     }
 

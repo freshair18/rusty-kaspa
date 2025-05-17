@@ -194,7 +194,7 @@ impl<
     ///
     /// To see why we can compare to any such block, observe that by definition all blocks in the range
     /// `[pruning sample, selected parent]` must have the same finality score.
-    fn is_pruning_sample(&self, self_blue_score: u64, epoch_chain_ancestor_blue_score: u64, finality_depth: u64) -> bool {
+    pub fn is_pruning_sample(&self, self_blue_score: u64, epoch_chain_ancestor_blue_score: u64, finality_depth: u64) -> bool {
         self.finality_score(epoch_chain_ancestor_blue_score, finality_depth) < self.finality_score(self_blue_score, finality_depth)
     }
 
@@ -485,7 +485,7 @@ impl<
         self.is_pruning_point_in_pruning_depth(tip_bs, pp_candidate, pruning_depth)
     }
 
-    pub fn are_pruning_points_in_valid_chain(&self, pruning_info: PruningPointInfo, syncer_sink: Hash) -> PruningImportResult<()> {
+    pub fn are_pruning_points_in_valid_chain(&self, pruning_info: PruningPointInfo) -> PruningImportResult<()> {
         // We want to validate that the past pruning points form a chain to genesis. Since
         // each pruning point's header doesn't point to the previous pruning point, but to
         // the pruning point from its POV, we can't just traverse from one pruning point to
@@ -502,7 +502,7 @@ impl<
         // any other pruning point in the list, so we are compelled to check if it's referenced by
         // the selected chain.
         let mut expected_pps_queue = VecDeque::new();
-        for current in self.reachability_service.forward_chain_iterator(pruning_info.pruning_point, syncer_sink, true).skip(1) {
+        for current in self.reachability_service.forward_chain_iterator(pruning_info.pruning_point, self.header_selected_tip_store.read().get().unwrap().hash, true).skip(1) {
             let current_header = self.headers_store.get_header(current).unwrap();
             // Post-crescendo: expected header pruning point is no longer part of header validity, but we want to make sure
             // the syncer's virtual chain indeed coincides with the pruning point and past pruning points before downloading
