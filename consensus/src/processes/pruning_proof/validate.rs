@@ -39,61 +39,58 @@ use super::{PruningProofManager, TempProofContext};
 impl PruningProofManager {
     pub fn validate_pruning_point_proof(
         &self,
-        proof: &PruningPointProof,
+        usurper_proof: &PruningPointProof,
         proof_metadata: &PruningProofMetadata,
     ) -> PruningImportResult<()> {
-        if proof.len() != self.max_block_level as usize + 1 {
+        if usurper_proof.len() != self.max_block_level as usize + 1 {
             return Err(PruningImportError::ProofNotEnoughLevels(self.max_block_level as usize + 1));
         }
 
         // Initialize the stores for the proof
-        let mut proof_stores_and_processes = self.init_validate_pruning_point_proof_stores_and_processes(proof)?;
-        let proof_pp_header = proof[0].last().expect("checked if empty");
-        let proof_pp = proof_pp_header.hash;
-        let proof_pp_level = calc_block_level(proof_pp_header, self.max_block_level);
-        let proof_selected_tip_by_level =
-            self.populate_stores_for_validate_pruning_point_proof(proof, &mut proof_stores_and_processes, true)?;
-        let proof_ghostdag_stores = proof_stores_and_processes.ghostdag_stores;
+        let mut usureper_proof_stores_and_processes = self.init_validate_pruning_point_proof_stores_and_processes(usurper_proof)?;
+        let usurper_pp_header = usurper_proof[0].last().expect("checked if empty");
+        let usurper_pp = usurper_pp_header.hash;
+        let usurper_pp_level = calc_block_level(usurper_pp_header, self.max_block_level);
+        let usurper_selected_tip_by_level =
+            self.populate_stores_for_validate_pruning_point_proof(usurper_proof, &mut usureper_proof_stores_and_processes, true)?;
+        let usurper_proof_ghostdag_stores = usureper_proof_stores_and_processes.ghostdag_stores;
 
         // Get the proof for the current consensus and recreate the stores for it
         // This is expected to be fast because if a proof exists, it will be cached.
         // If no proof exists, this is empty
-        let mut current_consensus_proof = self.get_pruning_point_proof();
-        if current_consensus_proof.is_empty() {
+        let mut dethroned_proof = self.get_pruning_point_proof();
+        if dethroned_proof.is_empty() {
             // An empty proof can only happen if we're at genesis. We're going to create a proof for this case that contains the genesis header only
             let genesis_header = self.headers_store.get_header(self.genesis_hash).unwrap();
-            current_consensus_proof = Arc::new((0..=self.max_block_level).map(|_| vec![genesis_header.clone()]).collect_vec());
+            dethroned_proof = Arc::new((0..=self.max_block_level).map(|_| vec![genesis_header.clone()]).collect_vec());
         }
-        let mut current_consensus_stores_and_processes =
-            self.init_validate_pruning_point_proof_stores_and_processes(&current_consensus_proof)?;
-        let _ = self.populate_stores_for_validate_pruning_point_proof(
-            &current_consensus_proof,
-            &mut current_consensus_stores_and_processes,
-            false,
-        )?;
-        let current_consensus_ghostdag_stores = current_consensus_stores_and_processes.ghostdag_stores;
+        let mut dethroned_proof_stores_and_processes =
+            self.init_validate_pruning_point_proof_stores_and_processes(&dethroned_proof)?;
+        let dethroned_selected_tip_by_level =
+            self.populate_stores_for_validate_pruning_point_proof(&dethroned_proof, &mut dethroned_proof_stores_and_processes, false)?;
+        let dethroned_ghostdag_stores = dethroned_proof_stores_and_processes.ghostdag_stores;
 
         let pruning_read = self.pruning_point_store.read();
         let relations_read = self.relations_stores.read();
-        let current_pp = pruning_read.get().unwrap().pruning_point;
-        let current_pp_header = self.headers_store.get_header(current_pp).unwrap();
+        let dethroned_pp = pruning_read.get().unwrap().pruning_point;
+        let dethroned_pp_header = self.headers_store.get_header(dethroned_pp).unwrap();
 
         // The accumulated blue work of current consensus from the pruning point onward
-        let pruning_period_work =
-            self.headers_selected_tip_store.read().get().unwrap().blue_work.saturating_sub(current_pp_header.blue_work);
+        let dethroned_pruning_period_work =
+            self.headers_selected_tip_store.read().get().unwrap().blue_work.saturating_sub(dethroned_pp_header.blue_work);
         // The claimed blue work of the prover from his pruning point and up to the triggering relay block. This work
         // will eventually be verified if the proof is accepted so we can treat it as trusted
-        let prover_claimed_pruning_period_work = proof_metadata.relay_block_blue_work.saturating_sub(proof_pp_header.blue_work);
+        let syncer_claimed_pruning_period_work = proof_metadata.relay_block_blue_work.saturating_sub(usurper_pp_header.blue_work);
 
-        for (level_idx, selected_tip) in proof_selected_tip_by_level.iter().copied().enumerate() {
+        for (level_idx, usurper_selected_tip) in usurper_selected_tip_by_level.iter().copied().enumerate() {
             let level = level_idx as BlockLevel;
-            self.validate_proof_selected_tip(selected_tip, level, proof_pp_level, proof_pp, proof_pp_header)?;
+            self.validate_proof_selected_tip(usurper_selected_tip, level, usurper_pp_level, usurper_pp, usurper_pp_header)?;
 
-            let proof_selected_tip_gd = proof_ghostdag_stores[level_idx].get_compact_data(selected_tip).unwrap();
+            let usurper_selected_tip_gd = usurper_proof_ghostdag_stores[level_idx].get_compact_data(usurper_selected_tip).unwrap();
 
             // Next check is to see if this proof is "better" than what's in the current consensus
             // Step 1 - look at only levels that have a full proof (least 2m blocks in the proof)
-            if proof_selected_tip_gd.blue_score < 2 * self.pruning_proof_m {
+            if usurper_selected_tip_gd.blue_score < 2 * self.pruning_proof_m {
                 continue;
             }
 
@@ -101,32 +98,46 @@ impl PruningProofManager {
             // we can determine if the proof is better. The proof is better if the blue work* difference between the
             // old current consensus's tips and the common ancestor is less than the blue work difference between the
             // proof's tip and the common ancestor.
-            if let Some((proof_common_ancestor_gd, common_ancestor_gd)) = self.find_proof_and_consensus_common_ancestor_ghostdag_data(
-                &proof_ghostdag_stores,
-                &current_consensus_ghostdag_stores,
-                selected_tip,
-                level,
-                proof_selected_tip_gd,
-            ) {
-                let proof_level_blue_work_diff = proof_selected_tip_gd.blue_work.saturating_sub(proof_common_ancestor_gd.blue_work);
-                for parent in self.parents_manager.parents_at_level(&current_pp_header, level).iter().copied() {
-                    // Not all parents by level are guaranteed to be GD populated, but at least one of them will (the proof level selected tip)
-                    if let Some(parent_blue_work) = current_consensus_ghostdag_stores[level_idx].get_blue_work(parent).unwrap_option()
-                    {
-                        let parent_blue_work_diff = parent_blue_work.saturating_sub(common_ancestor_gd.blue_work);
-                        if parent_blue_work_diff.saturating_add(pruning_period_work)
-                            >= proof_level_blue_work_diff.saturating_add(prover_claimed_pruning_period_work)
-                        {
-                            return Err(PruningImportError::PruningProofInsufficientBlueWork);
-                        }
-                    }
+            if let Some((usurper_common_ancestor_gd, dethroned_common_ancestor_gd)) = self
+                .find_proof_and_consensus_common_ancestor_ghostdag_data(
+                    &usurper_proof_ghostdag_stores,
+                    &dethroned_ghostdag_stores,
+                    usurper_selected_tip,
+                    level,
+                    usurper_selected_tip_gd,
+                )
+            {
+                let dethroned_selected_tip = dethroned_selected_tip_by_level[level_idx];
+                let dethroned_selected_tip_gd =
+                    usurper_proof_ghostdag_stores[level_idx].get_compact_data(dethroned_selected_tip).unwrap();
+                let dethroned_proof_level_blue_work_diff =
+                    dethroned_selected_tip_gd.blue_work.saturating_sub(dethroned_common_ancestor_gd.blue_work);
+                let usurper_proof_level_blue_work_diff =
+                    usurper_selected_tip_gd.blue_work.saturating_sub(usurper_common_ancestor_gd.blue_work);
+                if dethroned_proof_level_blue_work_diff.saturating_add(dethroned_pruning_period_work)
+                    >= usurper_proof_level_blue_work_diff.saturating_add(syncer_claimed_pruning_period_work)
+                {
+                    return Err(PruningImportError::PruningProofInsufficientBlueWork);
                 }
+
+                // for parent in self.parents_manager.parents_at_level(&current_pp_header, level).iter().copied() {
+                //     // Not all parents by level are guaranteed to be GD populated, but at least one of them will (the proof level selected tip)
+                //     if let Some(parent_blue_work) = current_consensus_ghostdag_stores[level_idx].get_blue_work(parent).unwrap_option()
+                //     {
+                //         let parent_blue_work_diff = parent_blue_work.saturating_sub(common_ancestor_gd.blue_work);
+                //         if parent_blue_work_diff.saturating_add(pruning_period_work)
+                //             >= proof_level_blue_work_diff.saturating_add(prover_claimed_pruning_period_work)
+                //         {
+                //             return Err(PruningImportError::PruningProofInsufficientBlueWork);
+                //         }
+                //     }
+                // }
 
                 return Ok(());
             }
         }
 
-        if current_pp == self.genesis_hash {
+        if dethroned_pp == self.genesis_hash {
             // If the proof has better tips and the current pruning point is still
             // genesis, we consider the proof state to be better.
             return Ok(());
@@ -139,31 +150,36 @@ impl PruningProofManager {
         for level in (0..=self.max_block_level).rev() {
             let level_idx = level as usize;
 
-            let proof_selected_tip = proof_selected_tip_by_level[level_idx];
-            let proof_selected_tip_gd = proof_ghostdag_stores[level_idx].get_compact_data(proof_selected_tip).unwrap();
-            if proof_selected_tip_gd.blue_score < 2 * self.pruning_proof_m {
+            let usurper_selected_tip = usurper_selected_tip_by_level[level_idx];
+            let usurper_selected_tip_gd = usurper_proof_ghostdag_stores[level_idx].get_compact_data(usurper_selected_tip).unwrap();
+            if usurper_selected_tip_gd.blue_score < 2 * self.pruning_proof_m {
                 continue;
             }
+            let dethroned_selected_tip = dethroned_selected_tip_by_level[level_idx];
+            let dethroned_selected_tip_gd = usurper_proof_ghostdag_stores[level_idx].get_compact_data(dethroned_selected_tip).unwrap();
 
-            match relations_read[level_idx].get_parents(current_pp).unwrap_option() {
-                Some(parents) => {
-                    if parents.iter().copied().any(|parent| {
-                        current_consensus_ghostdag_stores[level_idx].get_blue_score(parent).unwrap() < 2 * self.pruning_proof_m
-                    }) {
-                        return Ok(());
-                    }
-                }
-                None => {
-                    // If the current pruning point doesn't have a parent at this level, we consider the proof state to be better.
-                    return Ok(());
-                }
+            if dethroned_selected_tip_gd.blue_score < 2 * self.pruning_proof_m {
+                return Ok(());
             }
+            // match relations_read[level_idx].get_parents(current_pp).unwrap_option() {
+            //     Some(parents) => {
+            //         if parents.iter().copied().any(|parent| {
+            //             current_consensus_ghostdag_stores[level_idx].get_blue_score(parent).unwrap() < 2 * self.pruning_proof_m
+            //         }) {
+            //             return Ok(());
+            //         }
+            //     }
+            //     None => {
+            //         // If the current pruning point doesn't have a parent at this level, we consider the proof state to be better.
+            //         return Ok(());
+            //     }
+            // }
         }
 
         drop(pruning_read);
         drop(relations_read);
-        drop(proof_stores_and_processes.db_lifetime);
-        drop(current_consensus_stores_and_processes.db_lifetime);
+        drop(usureper_proof_stores_and_processes.db_lifetime);
+        drop(dethroned_proof_stores_and_processes.db_lifetime);
 
         Err(PruningImportError::PruningProofNotEnoughHeaders)
     }
@@ -352,7 +368,7 @@ impl PruningProofManager {
         proof_pp: Hash,
         proof_pp_header: &Header,
     ) -> PruningImportResult<()> {
-        // A proof selected tip of some level has to be the proof suggested prunint point itself if its level
+        // A proof selected tip of some level has to be the proof suggested pruning point itself if its level
         // is lower or equal to the pruning point level, or a parent of the pruning point on the relevant level
         // otherwise.
         if level <= proof_pp_level {
