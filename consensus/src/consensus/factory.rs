@@ -1,6 +1,9 @@
 #[cfg(feature = "devnet-prealloc")]
 use super::utxo_set_override::{set_genesis_utxo_commitment_from_config, set_initial_utxo_set};
-use super::{Consensus, ctl::Ctl};
+use super::{
+    Consensus,
+    ctl::{Ctl, ManagedConsensusRole},
+};
 use crate::{model::stores::U64Key, pipeline::ProcessingCounters};
 use itertools::Itertools;
 use kaspa_consensus_core::{api::ConsensusApi, config::Config, mining_rules::MiningRules};
@@ -49,6 +52,7 @@ pub enum ConsensusEntryType {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MultiConsensusMetadata {
     current_consensus_key: Option<u64>,
+    usurper_consensus_key: Option<u64>,
     staging_consensus_key: Option<u64>,
     /// Max key used for a consensus entry
     max_key_used: u64,
@@ -65,6 +69,7 @@ impl Default for MultiConsensusMetadata {
     fn default() -> Self {
         Self {
             current_consensus_key: Default::default(),
+            usurper_consensus_key: Default::default(),
             staging_consensus_key: Default::default(),
             max_key_used: Default::default(),
             is_archival_node: Default::default(),
@@ -125,9 +130,9 @@ impl MultiConsensusManagementStore {
     }
 
     // This function assumes metadata is already set
-    pub fn staging_consensus_entry(&mut self) -> Option<ConsensusEntry> {
+    pub fn usurper_consensus_entry(&mut self) -> Option<ConsensusEntry> {
         let metadata = self.metadata.read().unwrap();
-        match metadata.staging_consensus_key {
+        match metadata.usurper_consensus_key {
             Some(key) => Some(self.entries.read(key.into()).unwrap()),
             None => None,
         }
@@ -148,6 +153,22 @@ impl MultiConsensusManagementStore {
         Ok(())
     }
 
+    pub fn new_usurper_consensus_entry(&mut self) -> StoreResult<ConsensusEntry> {
+        let mut metadata = self.metadata.read()?;
+
+        metadata.max_key_used += 1;
+        let new_key = metadata.max_key_used;
+        metadata.usurper_consensus_key = Some(new_key);
+        let new_entry = ConsensusEntry::from_key(new_key);
+
+        let mut batch = WriteBatch::default();
+        self.metadata.write(BatchDbWriter::new(&mut batch), &metadata)?;
+        self.entries.write(BatchDbWriter::new(&mut batch), new_key.into(), new_entry.clone())?;
+        self.db.write(batch)?;
+
+        Ok(new_entry)
+    }
+
     pub fn new_staging_consensus_entry(&mut self) -> StoreResult<ConsensusEntry> {
         let mut metadata = self.metadata.read()?;
 
@@ -162,6 +183,38 @@ impl MultiConsensusManagementStore {
         self.db.write(batch)?;
 
         Ok(new_entry)
+    }
+
+    pub fn commit_usurper_consensus(&mut self) -> StoreResult<()> {
+        self.metadata.update(DirectDbWriter::new(&self.db), |mut data| {
+            assert!(data.usurper_consensus_key.is_some());
+            data.current_consensus_key = data.usurper_consensus_key.take();
+            data
+        })?;
+        Ok(())
+    }
+
+    pub fn cancel_usurper_consensus(&mut self) -> StoreResult<()> {
+        self.metadata.update(DirectDbWriter::new(&self.db), |mut data| {
+            data.usurper_consensus_key = None;
+            data
+        })?;
+        Ok(())
+    }
+
+    pub fn promote_usurper_to_staging_consensus(&mut self) -> StoreResult<Option<ConsensusEntry>> {
+        let mut metadata = self.metadata.read()?;
+        let usurper_key = metadata.usurper_consensus_key.take().expect("Usurper consensus is expected when promoting to Staging");
+        let replaced_staging = metadata.staging_consensus_key.take().map(|key| self.entries.read(key.into()).unwrap());
+        metadata.staging_consensus_key = Some(usurper_key);
+
+        let mut batch = WriteBatch::default();
+        self.metadata.write(BatchDbWriter::new(&mut batch), &metadata)?;
+        if let Some(replaced) = replaced_staging.clone() {
+            self.entries.delete(BatchDbWriter::new(&mut batch), replaced.key.into())?;
+        }
+        self.db.write(batch)?;
+        Ok(replaced_staging)
     }
 
     pub fn commit_staging_consensus(&mut self) -> StoreResult<()> {
@@ -181,6 +234,14 @@ impl MultiConsensusManagementStore {
         Ok(())
     }
 
+    pub fn staging_consensus_entry(&mut self) -> Option<ConsensusEntry> {
+        let metadata = self.metadata.read().unwrap();
+        match metadata.staging_consensus_key {
+            Some(key) => Some(self.entries.read(key.into()).unwrap()),
+            None => None,
+        }
+    }
+
     fn iterator(&self) -> impl Iterator<Item = Result<ConsensusEntry, Box<dyn Error>>> + '_ {
         self.entries.iterator().map(|iter_result| match iter_result {
             Ok((_, entry)) => Ok(entry),
@@ -189,10 +250,15 @@ impl MultiConsensusManagementStore {
     }
 
     fn iterate_inactive_entries(&self) -> impl Iterator<Item = Result<ConsensusEntry, Box<dyn Error>>> + '_ {
-        let current_consensus_key = self.metadata.read().unwrap().current_consensus_key;
+        let metadata = self.metadata.read().unwrap();
+        let current_consensus_key = metadata.current_consensus_key;
+        let usurper_consensus_key = metadata.usurper_consensus_key;
+        let staging_consensus_key = metadata.staging_consensus_key;
         self.iterator().filter(move |entry_result| {
             if let Ok(entry) = entry_result {
-                return Some(entry.key) != current_consensus_key;
+                return Some(entry.key) != current_consensus_key
+                    && Some(entry.key) != usurper_consensus_key
+                    && Some(entry.key) != staging_consensus_key;
             }
 
             true
@@ -326,7 +392,7 @@ impl ConsensusFactory for Factory {
         let db = kaspa_database::prelude::ConnBuilder::default()
             .with_db_path(dir)
             .with_parallelism(self.db_parallelism)
-            .with_files_limit(self.fd_budget / 2) // active and staging consensuses should have equal budgets
+            .with_files_limit(self.fd_budget / 2) // active and Usurper consensuses should have equal budgets
             .with_preset(self.rocksdb_preset)
             .with_wal_dir(self.wal_dir.clone())
             .with_cache_budget(self.cache_budget)
@@ -353,18 +419,21 @@ impl ConsensusFactory for Factory {
             self.management_store.write().save_new_active_consensus(entry).unwrap();
         }
 
-        (ConsensusInstance::new(session_lock, consensus.clone()), Arc::new(Ctl::new(self.management_store.clone(), db, consensus)))
+        (
+            ConsensusInstance::new(session_lock, consensus.clone()),
+            Arc::new(Ctl::new(self.management_store.clone(), db, consensus, ManagedConsensusRole::Active)),
+        )
     }
 
-    fn new_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+    fn new_usurper_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
         assert!(!self.notification_root.is_closed());
 
-        let entry = self.management_store.write().new_staging_consensus_entry().unwrap();
+        let entry = self.management_store.write().new_usurper_consensus_entry().unwrap();
         let dir = self.db_root_dir.join(entry.directory_name);
         let db = kaspa_database::prelude::ConnBuilder::default()
             .with_db_path(dir)
             .with_parallelism(self.db_parallelism)
-            .with_files_limit(self.fd_budget / 2) // active and staging consensuses should have equal budgets
+            .with_files_limit(self.fd_budget / 2) // active and usurper consensuses should have equal budgets
             .with_preset(self.rocksdb_preset)
             .with_wal_dir(self.wal_dir.clone())
             .with_cache_budget(self.cache_budget)
@@ -384,10 +453,62 @@ impl ConsensusFactory for Factory {
         ));
 
         // The default for the body_missing_anticone_set is an empty vector, which corresponds precisely to the state before a consensus commit
-        // But The default value for the pruning_utxoset_stable_flag is true, but a staging consensus does not have a utxo and hence the flag is dropped explicitly
+        // But the default value for the pruning_utxoset_stable_flag is true, but a Usurper consensus does not have a utxo and hence the flag is dropped explicitly
         consensus.set_pruning_utxoset_stable_flag(false);
 
-        (ConsensusInstance::new(session_lock, consensus.clone()), Arc::new(Ctl::new(self.management_store.clone(), db, consensus)))
+        (
+            ConsensusInstance::new(session_lock, consensus.clone()),
+            Arc::new(Ctl::new(self.management_store.clone(), db, consensus, ManagedConsensusRole::Usurper)),
+        )
+    }
+
+    fn load_or_create_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        assert!(!self.notification_root.is_closed());
+
+        let entry = {
+            let mut write_guard = self.management_store.write();
+            write_guard.staging_consensus_entry().unwrap_or_else(|| write_guard.new_staging_consensus_entry().unwrap())
+        };
+        let dir = self.db_root_dir.join(entry.directory_name);
+        let db = kaspa_database::prelude::ConnBuilder::default()
+            .with_db_path(dir)
+            .with_parallelism(self.db_parallelism)
+            .with_files_limit(self.fd_budget / 2)
+            .with_preset(self.rocksdb_preset)
+            .with_wal_dir(self.wal_dir.clone())
+            .with_cache_budget(self.cache_budget)
+            .build()
+            .unwrap();
+
+        let session_lock = SessionLock::new();
+        let consensus = Arc::new(Consensus::new(
+            db.clone(),
+            Arc::new(self.config.to_builder().skip_adding_genesis().build()),
+            session_lock.clone(),
+            self.notification_root.clone(),
+            self.counters.clone(),
+            self.tx_script_cache_counters.clone(),
+            entry.creation_timestamp,
+            self.mining_rules.clone(),
+        ));
+
+        // A Staging consensus should not have a set utxoset, we overwrite this in the case this consensus is new.
+        consensus.set_pruning_utxoset_stable_flag(false);
+
+        (
+            ConsensusInstance::new(session_lock, consensus.clone()),
+            Arc::new(Ctl::new(self.management_store.clone(), db, consensus, ManagedConsensusRole::Staging)),
+        )
+    }
+
+    fn promote_usurper_to_staging(&self) {
+        let replaced_staging = self.management_store.write().promote_usurper_to_staging_consensus().unwrap();
+        if let Some(entry) = replaced_staging {
+            let dir = self.db_root_dir.join(entry.directory_name);
+            if let Err(e) = fs::remove_dir_all(dir) {
+                warn!("Error deleting replaced Staging consensus entry {}: {}", entry.key, e);
+            }
+        }
     }
 
     fn close(&self) {
@@ -396,8 +517,8 @@ impl ConsensusFactory for Factory {
     }
 
     fn delete_inactive_consensus_entries(&self) {
-        // Staging entry is deleted also by archival nodes since it represents non-final data
-        self.delete_staging_entry();
+        // Usurper entry is deleted also by archival nodes since it represents non-final data
+        self.delete_usurper_entry();
 
         if self.config.is_archival {
             return;
@@ -425,6 +546,22 @@ impl ConsensusFactory for Factory {
 
         for entry in entries_to_delete {
             write_guard.delete_entry(entry).unwrap();
+        }
+    }
+
+    fn delete_usurper_entry(&self) {
+        let mut write_guard = self.management_store.write();
+        if let Some(entry) = write_guard.usurper_consensus_entry() {
+            let dir = self.db_root_dir.join(entry.directory_name.clone());
+            match fs::remove_dir_all(dir) {
+                Ok(_) => {
+                    write_guard.delete_entry(entry).unwrap();
+                }
+                Err(e) => {
+                    warn!("Error deleting Usurper consensus entry {}: {}", entry.key, e);
+                }
+            };
+            write_guard.cancel_usurper_consensus().unwrap();
         }
     }
 

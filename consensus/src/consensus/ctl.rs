@@ -13,6 +13,14 @@ pub struct Ctl {
     _consensus_db_ref: Weak<DB>,
     _consensus_db_path: PathBuf,
     consensus: Arc<Consensus>,
+    consensus_role: ManagedConsensusRole,
+}
+
+#[derive(Clone, Copy)]
+pub enum ManagedConsensusRole {
+    Active,
+    Usurper,
+    Staging,
 }
 
 impl Ctl {
@@ -20,10 +28,11 @@ impl Ctl {
         management_store: Arc<RwLock<MultiConsensusManagementStore>>,
         consensus_db: Arc<DB>,
         consensus: Arc<Consensus>,
+        consensus_role: ManagedConsensusRole,
     ) -> Self {
         let _consensus_db_path = consensus_db.path().to_owned();
         let _consensus_db_ref = Arc::downgrade(&consensus_db);
-        Self { management_store, _consensus_db_ref, _consensus_db_path, consensus }
+        Self { management_store, _consensus_db_ref, _consensus_db_path, consensus, consensus_role }
     }
 }
 
@@ -37,8 +46,12 @@ impl ConsensusCtl for Ctl {
     }
 
     fn make_active(&self) {
-        // TODO: pass a value to make sure the correct consensus is committed
-        self.management_store.write().commit_staging_consensus().unwrap();
+        let mut store = self.management_store.write();
+        match self.consensus_role {
+            ManagedConsensusRole::Active => panic!("make_active called on active consensus controller"),
+            ManagedConsensusRole::Usurper => panic!("usurper consensus cannot be committed directly; promote it to staging first"),
+            ManagedConsensusRole::Staging => store.commit_staging_consensus().unwrap(),
+        }
     }
 }
 
@@ -56,3 +69,5 @@ impl ConsensusCtl for Consensus {
         unimplemented!()
     }
 }
+
+

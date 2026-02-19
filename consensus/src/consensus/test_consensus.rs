@@ -281,7 +281,7 @@ impl Service for TestConsensus {
     }
 }
 
-/// A factory which always returns the same consensus instance. Does not support the staging API.
+/// A factory which always returns the same consensus instance. Does not support the usurper API.
 pub struct TestConsensusFactory {
     tc: Arc<TestConsensus>,
 }
@@ -298,7 +298,15 @@ impl ConsensusFactory for TestConsensusFactory {
         (ci, self.tc.consensus_clone() as DynConsensusCtl)
     }
 
-    fn new_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+    fn new_usurper_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        unimplemented!()
+    }
+
+    fn load_or_create_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        unimplemented!()
+    }
+
+    fn promote_usurper_to_staging(&self) {
         unimplemented!()
     }
 
@@ -307,6 +315,10 @@ impl ConsensusFactory for TestConsensusFactory {
     }
 
     fn delete_inactive_consensus_entries(&self) {
+        unimplemented!()
+    }
+
+    fn delete_usurper_entry(&self) {
         unimplemented!()
     }
 

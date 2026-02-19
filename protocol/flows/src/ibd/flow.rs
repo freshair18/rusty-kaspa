@@ -156,17 +156,17 @@ impl IbdFlow {
                 .await?;
             }
             IbdType::DownloadHeadersProof => {
-                drop(session); // Avoid holding the previous consensus throughout the staging IBD
-                let staging = self.ctx.consensus_manager.new_staging_consensus();
-                match self.ibd_with_headers_proof(&staging, negotiation_output.syncer_virtual_selected_parent, &relay_block).await {
+                drop(session); // Avoid holding the previous consensus throughout the Usurper IBD
+                let staging = self.verify_candidate_consensus_against_existing_staging(&negotiation_output, &relay_block).await?;
+                match self.sync_and_confirm_staging(&staging, negotiation_output.syncer_virtual_selected_parent, &relay_block).await {
                     Ok(()) => {
                         spawn_blocking(|| staging.commit()).await.unwrap();
                         info!(
-                            "Header download stage of IBD with headers proof completed successfully from {}. Committed staging consensus.",
+                            "Header download stage of IBD with headers proof completed successfully from {}. Committed Usurper consensus.",
                             self.router
                         );
 
-                        // This will reobtain the freshly committed staging consensus
+                        // This will reobtain the freshly committed Usurper consensus
                         session = self.ctx.consensus().session().await;
                         // Next, sync a utxoset corresponding to the new pruning point from the syncer.
                         // Note that the new pruning point's anticone need not be downloaded separately as in other IBD types
@@ -175,7 +175,6 @@ impl IbdFlow {
                     }
                     Err(e) => {
                         warn!("IBD with headers proof from {} was unsuccessful ({})", self.router, e);
-                        staging.cancel();
                         return Err(e);
                     }
                 }
@@ -319,6 +318,66 @@ impl IbdFlow {
         }
     }
 
+    async fn verify_candidate_consensus_against_existing_staging(
+        &mut self,
+        negotiation_output: &ChainNegotiationOutput,
+        relay_block: &Block,
+    ) -> Result<StagingConsensus, ProtocolError> {
+        info!("Starting IBD with headers proof with peer {}", self.router);
+
+        let staging = self.ctx.consensus_manager.load_or_create_staging_consensus();
+        let staging_session = staging.session().await;
+        let staging_pp = staging_session.async_pruning_point().await;
+        let staging_pp_header = staging_session.async_get_header(staging_pp).await?;
+        if staging_pp == negotiation_output.syncer_pruning_point {
+            info!("syncer's pruning point matches that of locally stored staging consensus");
+            return Ok(staging);
+        }
+        let clear_syncer_inferiority = match staging_session.async_get_header(negotiation_output.syncer_pruning_point).await {
+            Ok(syncer_pp_header) => syncer_pp_header.blue_work < staging_pp_header.blue_work,
+            Err(_) => false,
+        };
+
+        if clear_syncer_inferiority {
+            return Err(ProtocolError::OtherOwned(
+                "syncer's pruning point is deemed inferior to pruning point stored in the current staging consensus, aborting ibd".to_owned(),
+            ));
+        }
+
+        let usurper = self.ctx.consensus_manager.new_usurper_consensus();
+        let usurper_session = usurper.session().await;
+
+        info!("syncer's pruning point differs from that of locally stored staging consensus, verifying pruning proof");
+        let usurper_pp = match self.sync_and_validate_pruning_proof(&usurper_session, relay_block).await {
+            Ok(pp) => pp,
+            Err(e) => {
+                usurper.cancel();
+                return Err(e);
+            }
+        };
+        let usurper_pp_header = match usurper_session.async_get_header(usurper_pp).await {
+            Ok(header) => header,
+            Err(e) => {
+                usurper.cancel();
+                return Err(ProtocolError::ConsensusError(e));
+            }
+        };
+
+        if usurper_pp_header.blue_work <= staging_pp_header.blue_work {
+            usurper.cancel();
+            return Err(ProtocolError::OtherOwned(
+                "syncer's pruning point is deemed inferior to pruning point stored in the current staging consensus, aborting ibd".to_owned(),
+            ));
+        }
+
+        staging.shutdown();
+        Ok(spawn_blocking(|| {
+            info!("usurping consensus verified as superior and is promoted to the current staging consensus");
+            usurper.promote_to_staging()
+        })
+        .await
+        .unwrap())
+    }
     /// This function is triggered when the syncer's pruning point is higher
     /// than ours and we already processed its header before.
     /// so we only need to sync more headers and set it to our new pruning point before proceeding with IBD
@@ -349,24 +408,22 @@ impl IbdFlow {
         Ok(())
     }
 
-    async fn ibd_with_headers_proof(
+    async fn sync_and_confirm_staging(
         &mut self,
         staging: &StagingConsensus,
         syncer_virtual_selected_parent: Hash,
         relay_block: &Block,
     ) -> Result<(), ProtocolError> {
-        info!("Starting IBD with headers proof with peer {}", self.router);
-
         let staging_session = staging.session().await;
-
-        let pruning_point = self.sync_and_validate_pruning_proof(&staging_session, relay_block).await?;
+        let pruning_point = staging_session.async_pruning_point().await;
+        info!("Starting IBD with headers proof with peer {}", self.router);
         self.sync_headers(&staging_session, syncer_virtual_selected_parent, pruning_point, relay_block).await?;
         staging_session.async_validate_pruning_points(syncer_virtual_selected_parent).await?;
         self.validate_staging_timestamps(&self.ctx.consensus().session().await, &staging_session).await?;
         Ok(())
     }
 
-    async fn sync_and_validate_pruning_proof(&mut self, staging: &ConsensusProxy, relay_block: &Block) -> Result<Hash, ProtocolError> {
+    async fn sync_and_validate_pruning_proof(&mut self, usurper: &ConsensusProxy, relay_block: &Block) -> Result<Hash, ProtocolError> {
         self.router.enqueue(make_message!(Payload::RequestPruningPointProof, RequestPruningPointProofMessage {})).await?;
 
         // Pruning proof generation and communication might take several minutes, so we allow a long 10 minute timeout
@@ -380,7 +437,7 @@ impl IbdFlow {
 
         let proof_metadata = PruningProofMetadata::new(relay_block.header.blue_work);
 
-        // Get a new session for current consensus (non staging)
+        // Get a new session for current consensus (non usurper)
         let consensus = self.ctx.consensus().session().await;
 
         // The proof is validated in the context of current consensus
@@ -462,7 +519,7 @@ impl IbdFlow {
 
         if self.ctx.config.enable_sanity_checks {
             let con = self.ctx.consensus().unguarded_session_blocking();
-            trusted_set = staging
+            trusted_set = usurper
                 .clone()
                 .spawn_blocking(move |c| {
                     let ref_proof = proof.clone();
@@ -494,7 +551,7 @@ impl IbdFlow {
                 })
                 .await?;
         } else {
-            trusted_set = staging
+            trusted_set = usurper
                 .clone()
                 .spawn_blocking(move |c| {
                     c.apply_pruning_proof(proof, &trusted_set)?;
@@ -504,7 +561,7 @@ impl IbdFlow {
                 .await?;
         }
 
-        // TODO (relaxed): add logs to staging commit process
+        // TODO (relaxed): add logs to usurper commit process
 
         info!("Starting to process {} trusted blocks", trusted_set.len());
         let mut last_time = Instant::now();
@@ -518,9 +575,9 @@ impl IbdFlow {
                 last_index = i;
             }
             // TODO (relaxed): queue and join in batches
-            staging.validate_and_insert_trusted_block(tb).virtual_state_task.await?;
+            usurper.validate_and_insert_trusted_block(tb).virtual_state_task.await?;
         }
-        staging.async_clear_body_missing_anticone_set().await;
+        usurper.async_clear_body_missing_anticone_set().await;
         info!("Done processing trusted blocks");
         Ok(proof_pruning_point)
     }

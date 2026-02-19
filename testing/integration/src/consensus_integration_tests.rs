@@ -1398,7 +1398,8 @@ async fn staging_consensus_test() {
     core.bind(consensus_manager.clone());
     let joins = core.start();
 
-    let staging = consensus_manager.new_staging_consensus();
+    let usurper = consensus_manager.new_usurper_consensus();
+    let staging = usurper.promote_to_staging();
     staging.commit();
 
     core.shutdown();

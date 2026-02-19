@@ -32,8 +32,15 @@ pub trait ConsensusFactory: Sync + Send {
     /// Load an instance of current active consensus or create one if no such exists
     fn new_active_consensus(&self) -> (ConsensusInstance, DynConsensusCtl);
 
-    /// Create a new empty staging consensus
-    fn new_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl);
+    /// Create a new empty Usurper consensus
+    fn new_usurper_consensus(&self) -> (ConsensusInstance, DynConsensusCtl);
+
+    /// Load the existing Staging consensus or create a new empty Staging consensus
+    fn load_or_create_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl);
+
+    /// Promote the current Usurper consensus to be the Staging consensus.
+    /// If a Staging already exists, it is replaced.
+    fn promote_usurper_to_staging(&self);
 
     /// Close the factory and cleanup any shared resources used by it
     fn close(&self);
@@ -41,8 +48,11 @@ pub trait ConsensusFactory: Sync + Send {
     /// If the node is not configured as archival -- delete inactive consensus entries and their databases  
     fn delete_inactive_consensus_entries(&self);
 
-    /// Delete the staging consensus entry and its database (this is done even if the node is archival
-    /// since staging reflects non-final data)
+    /// Delete the Usurper consensus entry and its database (this is done even if the node is archival
+    /// since Usurper reflects non-final data)
+    fn delete_usurper_entry(&self);
+
+    /// Delete the Staging consensus entry and its database
     fn delete_staging_entry(&self);
 }
 
@@ -54,7 +64,15 @@ impl ConsensusFactory for MockFactory {
         unimplemented!()
     }
 
-    fn new_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+    fn new_usurper_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        unimplemented!()
+    }
+
+    fn load_or_create_staging_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        unimplemented!()
+    }
+
+    fn promote_usurper_to_staging(&self) {
         unimplemented!()
     }
 
@@ -63,6 +81,10 @@ impl ConsensusFactory for MockFactory {
     }
 
     fn delete_inactive_consensus_entries(&self) {
+        unimplemented!()
+    }
+
+    fn delete_usurper_entry(&self) {
         unimplemented!()
     }
 
@@ -97,7 +119,7 @@ struct ManagerInner {
     /// Service join handles
     handles: VecDeque<JoinHandle<()>>,
 
-    /// Handlers called when the consensus is reset to a staging consensus
+    /// Handlers called when the consensus is reset to a Usurper consensus
     consensus_reset_handlers: Vec<Arc<dyn ConsensusResetHandler>>,
 }
 
@@ -124,7 +146,7 @@ impl ConsensusManager {
         Self { factory, inner: RwLock::new(ManagerInner::new(consensus, ctl)) }
     }
 
-    /// Creates a consensus manager with a fixed consensus. Will panic if staging API is used. To be
+    /// Creates a consensus manager with a fixed consensus. Will panic if Usurper API is used. To be
     /// used for test purposes only.
     pub fn from_consensus<T: ConsensusApi + ConsensusCtl + 'static>(consensus: Arc<T>) -> Self {
         let (consensus, ctl) = (consensus.clone() as DynConsensus, consensus as DynConsensusCtl);
@@ -138,13 +160,22 @@ impl ConsensusManager {
         self.inner.read().current.consensus.clone()
     }
 
-    pub fn new_staging_consensus(self: &Arc<Self>) -> StagingConsensus {
-        let (consensus, ctl) = self.factory.new_staging_consensus();
+    pub fn new_usurper_consensus(self: &Arc<Self>) -> UsurperConsensus {
+        let (consensus, ctl) = self.factory.new_usurper_consensus();
+        UsurperConsensus::new(self.clone(), ConsensusInner::new(consensus, ctl))
+    }
+
+    pub fn load_or_create_staging_consensus(self: &Arc<Self>) -> StagingConsensus {
+        let (consensus, ctl) = self.factory.load_or_create_staging_consensus();
         StagingConsensus::new(self.clone(), ConsensusInner::new(consensus, ctl))
     }
 
     pub fn register_consensus_reset_handler(&self, handler: Arc<dyn ConsensusResetHandler>) {
         self.inner.write().consensus_reset_handlers.push(handler);
+    }
+
+    pub fn promote_usurper_to_staging(&self) {
+        self.factory.promote_usurper_to_staging();
     }
 
     fn worker(&self) {
@@ -166,6 +197,10 @@ impl ConsensusManager {
 
     pub fn delete_inactive_consensus_entries(&self) {
         self.factory.delete_inactive_consensus_entries();
+    }
+
+    pub fn delete_usurper_entry(&self) {
+        self.factory.delete_usurper_entry();
     }
 
     pub fn delete_staging_entry(&self) {
@@ -200,6 +235,43 @@ impl Service for ConsensusManager {
     }
 }
 
+pub struct UsurperConsensus {
+    manager: Arc<ConsensusManager>,
+    usurper: ConsensusInner,
+    handles: VecDeque<JoinHandle<()>>,
+}
+
+impl UsurperConsensus {
+    fn new(manager: Arc<ConsensusManager>, usurper: ConsensusInner) -> Self {
+        let handles = VecDeque::from_iter(usurper.ctl.start());
+        Self { manager, usurper, handles }
+    }
+
+    pub fn promote_to_staging(self) -> StagingConsensus {
+        self.manager.promote_usurper_to_staging();
+        StagingConsensus { manager: self.manager, staging: self.usurper, handles: self.handles }
+    }
+
+    pub fn cancel(self) {
+        self.usurper.ctl.stop();
+        for handle in self.handles {
+            handle.join().unwrap();
+        }
+        // Drop Usurper (and DB refs therein) so that the delete operation below succeeds
+        drop(self.usurper);
+        // Delete the canceled Usurper consensus
+        self.manager.delete_usurper_entry();
+    }
+}
+
+impl Deref for UsurperConsensus {
+    type Target = ConsensusInstance;
+
+    fn deref(&self) -> &Self::Target {
+        &self.usurper.consensus
+    }
+}
+
 pub struct StagingConsensus {
     manager: Arc<ConsensusManager>,
     staging: ConsensusInner,
@@ -220,10 +292,7 @@ impl StagingConsensus {
         g.current.ctl.make_active();
         drop(g);
         self.manager.invoke_consensus_reset_handlers();
-        // Drop `prev` so that deletion below succeeds
         drop(prev);
-        // Staging was committed and is now the active consensus so we can delete
-        // any previous, now inactive, consensus entries
         self.manager.delete_inactive_consensus_entries();
     }
 
@@ -232,10 +301,15 @@ impl StagingConsensus {
         for handle in self.handles {
             handle.join().unwrap();
         }
-        // Drop staging (and DB refs therein) so that the delete operation below succeeds
         drop(self.staging);
-        // Delete the canceled staging consensus
         self.manager.delete_staging_entry();
+    }
+
+    pub fn shutdown(self) {
+        self.staging.ctl.stop();
+        for handle in self.handles {
+            handle.join().unwrap();
+        }
     }
 }
 
@@ -246,3 +320,6 @@ impl Deref for StagingConsensus {
         &self.staging.consensus
     }
 }
+
+
+
