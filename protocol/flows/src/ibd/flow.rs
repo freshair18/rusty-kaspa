@@ -41,6 +41,7 @@ use tokio::time::sleep;
 
 use super::{HeadersChunk, IBD_BATCH_SIZE, PruningPointUtxosetChunkStream, progress::ProgressReporter};
 type BlockBody = Vec<Transaction>;
+const STAGING_REFRESH_REJECTION_THRESHOLD: u8 = 12;
 
 /// Flow for managing IBD - Initial Block Download
 pub struct IbdFlow {
@@ -52,6 +53,8 @@ pub struct IbdFlow {
 
     // Receives relay blocks from relay flow which are out of orphan resolution range and hence trigger IBD
     relay_receiver: JobReceiver<Block>,
+    // Counts consecutive peers rejected due to "syncer inferior to staging" checks.
+    staging_refresh_rejections: u8,
 }
 
 #[async_trait::async_trait]
@@ -87,7 +90,7 @@ impl IbdFlow {
         body_only_ibd_permitted: bool,
         header_format: HeaderFormat,
     ) -> Self {
-        Self { ctx, router, incoming_route, relay_receiver, body_only_ibd_permitted, header_format }
+        Self { ctx, router, incoming_route, relay_receiver, body_only_ibd_permitted, header_format, staging_refresh_rejections: 0 }
     }
 
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
@@ -325,23 +328,33 @@ impl IbdFlow {
     ) -> Result<StagingConsensus, ProtocolError> {
         info!("Starting IBD with headers proof with peer {}", self.router);
 
-        let staging = self.ctx.consensus_manager.load_or_create_staging_consensus();
-        let staging_session = staging.session().await;
-        let staging_pp = staging_session.async_pruning_point().await;
-        let staging_pp_header = staging_session.async_get_header(staging_pp).await?;
+        let mut staging = self.ctx.consensus_manager.load_or_create_staging_consensus();
+        let mut staging_session = staging.session().await;
+        let mut staging_pp = staging_session.async_pruning_point().await;
         if staging_pp == negotiation_output.syncer_pruning_point {
             info!("syncer's pruning point matches that of locally stored staging consensus");
             return Ok(staging);
         }
+        // reset staging consensus if too many rejections were accumulated.
+        if self.staging_refresh_rejections == STAGING_REFRESH_REJECTION_THRESHOLD {
+            staging.cancel();
+            staging = self.ctx.consensus_manager.load_or_create_staging_consensus();
+            staging_session = staging.session().await;
+            staging_pp = staging_session.async_pruning_point().await;
+        }
+        let staging_pp_header = staging_session.async_get_header(staging_pp).await?;
+
+        const INFERIOR_STAGING_ERR: &str =
+            "syncer's pruning point is deemed inferior to pruning point stored in the current staging consensus, aborting ibd";
+        let reject_inferior = || ProtocolError::OtherOwned(INFERIOR_STAGING_ERR.to_owned());
         let clear_syncer_inferiority = match staging_session.async_get_header(negotiation_output.syncer_pruning_point).await {
             Ok(syncer_pp_header) => syncer_pp_header.blue_work < staging_pp_header.blue_work,
             Err(_) => false,
         };
 
         if clear_syncer_inferiority {
-            return Err(ProtocolError::OtherOwned(
-                "syncer's pruning point is deemed inferior to pruning point stored in the current staging consensus, aborting ibd".to_owned(),
-            ));
+            let _ = self.staging_refresh_rejections.saturating_add(1);
+            return Err(reject_inferior());
         }
 
         let usurper = self.ctx.consensus_manager.new_usurper_consensus();
@@ -365,11 +378,11 @@ impl IbdFlow {
 
         if usurper_pp_header.blue_work <= staging_pp_header.blue_work {
             usurper.cancel();
-            return Err(ProtocolError::OtherOwned(
-                "syncer's pruning point is deemed inferior to pruning point stored in the current staging consensus, aborting ibd".to_owned(),
-            ));
+            let _ = self.staging_refresh_rejections.saturating_add(1);
+            return Err(reject_inferior());
         }
 
+        self.staging_refresh_rejections = 0;
         staging.shutdown();
         Ok(spawn_blocking(|| {
             info!("usurping consensus verified as superior and is promoted to the current staging consensus");
@@ -378,6 +391,7 @@ impl IbdFlow {
         .await
         .unwrap())
     }
+
     /// This function is triggered when the syncer's pruning point is higher
     /// than ours and we already processed its header before.
     /// so we only need to sync more headers and set it to our new pruning point before proceeding with IBD

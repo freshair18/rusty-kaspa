@@ -69,5 +69,3 @@ impl ConsensusCtl for Consensus {
         unimplemented!()
     }
 }
-
-

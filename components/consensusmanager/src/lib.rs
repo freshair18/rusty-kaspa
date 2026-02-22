@@ -320,6 +320,3 @@ impl Deref for StagingConsensus {
         &self.staging.consensus
     }
 }
-
-
-
