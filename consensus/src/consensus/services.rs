@@ -126,12 +126,15 @@ impl ConsensusServices {
         let tx_receipts_manager = TxReceiptsManager::new(
             params.genesis.clone(),
             params.finality_depth(),
+            params.toccata_activation,
             reachability_service.clone(),
             storage.headers_store.clone(),
             storage.selected_chain_store.clone(),
             storage.acceptance_data_store.clone(),
             storage.block_transactions_store.clone(),
             storage.pruning_point_store.clone(),
+            storage.smt_stores.clone(),
+            storage.smt_metadata_store.clone(),
             dag_traversal_manager.clone(),
             params.crescendo_activation,
         );

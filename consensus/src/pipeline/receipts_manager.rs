@@ -1,7 +1,10 @@
 use super::receipts_errors::ReceiptsErrors;
 use crate::model::{
     services::reachability::{MTReachabilityService, ReachabilityService},
-    stores::{acceptance_data::AcceptanceDataStoreReader, headers::HeaderStoreReader, reachability::ReachabilityStoreReader},
+    stores::{
+        acceptance_data::AcceptanceDataStoreReader, headers::HeaderStoreReader, reachability::ReachabilityStoreReader,
+        smt_metadata::DbSmtMetadataStore,
+    },
 };
 use crate::{
     consensus::services::DbDagTraversalManager,
@@ -9,14 +12,17 @@ use crate::{
         block_transactions::BlockTransactionsStoreReader, pruning::PruningStoreReader, selected_chain::SelectedChainStoreReader,
     },
 };
+use kaspa_consensus_core::api::{SeqCommitLaneEntry, SeqCommitLaneProof};
 use kaspa_consensus_core::{
+    errors::consensus::{ConsensusError, ConsensusResult},
     config::{genesis::GenesisBlock, params::ForkActivation},
     header::Header,
     receipts::TxReceipt,
 };
-use kaspa_hashes::Hash;
+use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_merkle::{calc_merkle_root, create_merkle_witness, merkle_hash, verify_merkle_witness};
 use kaspa_seq_commit::{hashing::seq_state_root, types::SeqState};
+use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
 
 use parking_lot::RwLock;
 
@@ -33,6 +39,7 @@ pub struct TxReceiptsManager<
     pub genesis: GenesisBlock,
 
     pub posterity_depth: u64,
+    pub toccata_activation: ForkActivation,
     pub reachability_service: MTReachabilityService<U>,
 
     pub headers_store: Arc<V>,
@@ -40,6 +47,8 @@ pub struct TxReceiptsManager<
     pub acceptance_data_store: Arc<X>,
     pub block_transactions_store: Arc<W>,
     pub pruning_point_store: Arc<RwLock<Y>>,
+    pub smt_stores: Arc<SmtStores>,
+    pub smt_metadata_store: Arc<DbSmtMetadataStore>,
 
     pub crescendo_activation: ForkActivation,
 
@@ -59,18 +68,22 @@ impl<
     pub fn new(
         genesis: GenesisBlock,
         posterity_depth: u64,
+        toccata_activation: ForkActivation,
         reachability_service: MTReachabilityService<U>,
         headers_store: Arc<V>,
         selected_chain_store: Arc<RwLock<T>>,
         acceptance_data_store: Arc<X>,
         block_transactions_store: Arc<W>,
         pruning_point_store: Arc<RwLock<Y>>,
+        smt_stores: Arc<SmtStores>,
+        smt_metadata_store: Arc<DbSmtMetadataStore>,
         traversal_manager: DbDagTraversalManager,
         crescendo_activation: ForkActivation,
     ) -> Self {
         Self {
             genesis: genesis.clone(),
             posterity_depth,
+            toccata_activation,
             headers_store,
             selected_chain_store: selected_chain_store.clone(),
             acceptance_data_store: acceptance_data_store.clone(),
@@ -78,8 +91,111 @@ impl<
             crescendo_activation,
             block_transactions_store: block_transactions_store.clone(),
             pruning_point_store: pruning_point_store.clone(),
+            smt_stores,
+            smt_metadata_store,
             traversal_manager: traversal_manager.clone(),
         }
+    }
+
+    fn get_sink(&self) -> Hash {
+        self.selected_chain_store.read().get_tip().unwrap().1
+    }
+
+    fn is_smt_canonical(&self, block_hash: Hash, selected_parent: Hash) -> bool {
+        block_hash == ZERO_HASH || self.reachability_service.try_is_chain_ancestor_of(block_hash, selected_parent).unwrap_or(false)
+    }
+
+    fn inactivity_shortcut(&self, inactivity_shortcut_block: Hash) -> Hash {
+        assert_ne!(inactivity_shortcut_block, ZERO_HASH, "inactivity_shortcut block must be a real block hash");
+        let inactivity_shortcut_header = self.headers_store.get_header(inactivity_shortcut_block).unwrap();
+        if !self.toccata_activation.is_active(inactivity_shortcut_header.daa_score) {
+            return ZERO_HASH;
+        }
+        inactivity_shortcut_header.accepted_id_merkle_root
+    }
+
+    pub fn get_seq_commit_lane_proof(&self, block_hash: Hash, lane_key: Hash) -> ConsensusResult<SeqCommitLaneProof> {
+        // Genesis has no selected parent; reject before we try to dereference one.
+        if block_hash == self.genesis.hash {
+            return Err(ConsensusError::BlockIsGenesis(block_hash));
+        }
+
+        // Canonicality: must be a selected-parent-chain block (ancestor of or equal to sink).
+        let sink = self.get_sink();
+        if !self.reachability_service.is_chain_ancestor_of(block_hash, sink) {
+            return Err(ConsensusError::BlockNotInSelectedChain(block_hash));
+        }
+
+        // Depth: block must be at or after the current pruning point. Blocks before
+        // the pruning point may have had their SMT versions pruned.
+        let pruning_point = self.pruning_point_store.read().pruning_point().unwrap();
+        if !self.reachability_service.is_chain_ancestor_of(pruning_point, block_hash) {
+            return Err(ConsensusError::BlockTooDeep(block_hash));
+        }
+
+        let header = self.headers_store.get_header(block_hash).unwrap();
+
+        // KIP-21 activity_root only exists post-Toccata. Drop the gate after all
+        // nets activate.
+        if !self.toccata_activation.is_active(header.daa_score) {
+            return Err(ConsensusError::GeneralOwned(format!("toccata is not active at block {block_hash}")));
+        }
+
+        let selected_parent = header.post_toccata_chainblock_selected_parent();
+        let parent_header = self.headers_store.get_header(selected_parent).unwrap();
+
+        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.posterity_depth);
+        let smt_proof = self
+            .smt_stores
+            .prove_lane(&lane_key, current_bounds, |bh| self.is_smt_canonical(bh, block_hash))
+            .map_err(|e| ConsensusError::GeneralOwned(format!("prove_lane: {e}")))?;
+
+        let lane = self
+            .smt_stores
+            .get_lane(lane_key, current_bounds, |bh| self.is_smt_canonical(bh, block_hash))
+            .map(|v| SeqCommitLaneEntry { tip: *v.data(), blue_score: v.blue_score() });
+
+        let metadata = self.smt_metadata_store.get(block_hash).map_err(|e| ConsensusError::GeneralOwned(format!("smt_metadata: {e}")))?;
+
+        // Toccata is active (checked above), so the metadata carries a concrete
+        // shortcut block. Its header must exist: block_hash was verified to be a
+        // chain block between the pruning point and sink, so its shortcut block
+        // lies on the chain segment [pp - F, sink] which is not pruned while the
+        // caller holds the pruning lock read guard. Fold to seq_commit.
+        let inactivity_shortcut_block = metadata.inactivity_shortcut_block();
+        let inactivity_shortcut = self.inactivity_shortcut(inactivity_shortcut_block);
+
+        let parent_seq_commit = parent_header.accepted_id_merkle_root;
+
+        // In debug builds, verify the proof is consistent with the stored lanes_root
+        // and that metadata chains to the header's seq_commit.
+        debug_assert!({
+            use kaspa_hashes::SeqCommitActiveNode;
+            use kaspa_seq_commit::{
+                hashing::smt_leaf_hash,
+                types::SmtLeafInput,
+                verify::{SmtMetadata, verify_smt_metadata},
+            };
+            let lanes_root = self.smt_stores.get_lanes_root(current_bounds, |bh| self.is_smt_canonical(bh, block_hash));
+            let leaf = lane.as_ref().map(|l| smt_leaf_hash(&SmtLeafInput { lane_tip: &l.tip, blue_score: l.blue_score }));
+            let computed_root = smt_proof.as_proof().compute_root::<SeqCommitActiveNode>(&lane_key, leaf).unwrap();
+            let payload_and_ctx_digest = metadata.payload_and_ctx_digest();
+            let md = SmtMetadata {
+                lanes_root: &lanes_root,
+                payload_and_ctx_digest: &payload_and_ctx_digest,
+                parent_seq_commit: &parent_seq_commit,
+            };
+            computed_root == lanes_root
+                && verify_smt_metadata(&md, inactivity_shortcut, header.accepted_id_merkle_root, parent_seq_commit).is_ok()
+        });
+
+        Ok(SeqCommitLaneProof {
+            smt_proof,
+            lane,
+            payload_and_ctx_digest: metadata.payload_and_ctx_digest(),
+            parent_seq_commit,
+            inactivity_shortcut,
+        })
     }
 
     pub fn generate_tx_receipt(&self, accepting_block_header: Arc<Header>, tracked_tx_id: Hash) -> Result<TxReceipt, ReceiptsErrors> {
