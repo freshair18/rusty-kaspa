@@ -371,7 +371,7 @@ impl<
             let baseline_result =
                 self.baseline_umc_cascade_voting(conflict_genesis, subgroup, virtual_gd.clone(), k_to_check, &conflict_zone_manager);
 
-            if baseline_result.virtual_score != cascade_result.virtual_score {
+            if baseline_result.cascade_score != cascade_result.cascade_score {
                 if baseline_result.accepted != cascade_result.accepted {
                     self.counters.record_baseline_disagreement(baseline_result.accepted, cascade_result.accepted);
                 }
@@ -381,8 +381,8 @@ impl<
                      cascade_score={}, baseline_accepted={}, cascade_accepted={}, flips={}, voting_blocks={}",
                     k_to_check,
                     conflict_genesis,
-                    baseline_result.virtual_score,
-                    cascade_result.virtual_score,
+                    baseline_result.cascade_score,
+                    cascade_result.cascade_score,
                     baseline_result.accepted,
                     cascade_result.accepted,
                     cascade_result.flips,

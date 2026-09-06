@@ -100,7 +100,7 @@ impl CascadeMaintainer {
     }
 
     /// Returns the aggregate score of the virtual block.
-    pub fn virtual_score(&self) -> SignedWork {
+    pub fn cascade_score(&self) -> SignedWork {
         SignedWork::from(self.blue_work) + SignedWork::from(self.deficit_work)
             - SignedWork::from(self.red_work)
             - SignedWork::from(self.negative_blue_work * 2)
@@ -108,7 +108,7 @@ impl CascadeMaintainer {
 
     /// Check if the virtual block's aggregate cascade score is non-negative.
     pub fn virtual_accepts(&self) -> bool {
-        self.virtual_score() >= SignedWork::zero()
+        self.cascade_score() >= SignedWork::zero()
     }
 
     /// Returns the total number of bucket flips observed during cascade stabilization.
@@ -384,11 +384,11 @@ pub fn run_cascade(
         }
     }
 
-    let virtual_score = maintainer.virtual_score();
-    let accepted = virtual_score >= SignedWork::zero();
+    let cascade_score = maintainer.cascade_score();
+    let accepted = cascade_score >= SignedWork::zero();
 
     CascadeResult {
-        virtual_score,
+        cascade_score,
         accepted,
         flips: maintainer.flip_count,
         voting_blocks,
@@ -585,7 +585,7 @@ mod checkpoint_tests {
 
         // Both should produce identical cascade results
         assert_eq!(result1.accepted, result2.accepted, "accepted mismatch");
-        assert_eq!(result1.virtual_score, result2.virtual_score, "virtual score mismatch");
+        assert_eq!(result1.cascade_score, result2.cascade_score, "cascade score mismatch");
         assert_eq!(result1.flips, result2.flips, "flips mismatch");
     }
 
@@ -633,7 +633,7 @@ mod checkpoint_tests {
         );
 
         assert_eq!(result1.accepted, result2.accepted);
-        assert_eq!(result1.virtual_score, result2.virtual_score);
+        assert_eq!(result1.cascade_score, result2.cascade_score);
         assert!(result2.from_checkpoint);
     }
 
@@ -703,7 +703,7 @@ mod voter_tests {
 
         let result = voter.vote(&ctx);
 
-        assert_eq!(result.virtual_score, fixture.expected_score(), "virtual score mismatch");
+        assert_eq!(result.cascade_score, fixture.expected_score(), "cascade score mismatch");
         assert!(result.accepted, "zone should be accepted");
         assert_eq!(result.voting_blocks, 16, "blues 11, 10, 9, 7, 6, 5, 4, 3, 2 + CG + reds 12..17 (gray red 8 excluded)");
         assert_eq!(result.flips, 0, "segment tree cascade has no flips on this zone");
@@ -726,7 +726,7 @@ mod voter_tests {
         assert!(result2.from_checkpoint, "second vote must reload the persisted checkpoint");
 
         // The cascade outcome must be identical regardless of the checkpoint
-        assert_eq!(result1.virtual_score, result2.virtual_score, "virtual score mismatch");
+        assert_eq!(result1.cascade_score, result2.cascade_score, "cascade score mismatch");
         assert_eq!(result1.accepted, result2.accepted, "accepted mismatch");
         assert_eq!(result1.flips, result2.flips, "flips mismatch");
         assert_eq!(result1.voting_blocks, result2.voting_blocks, "voting blocks mismatch");
