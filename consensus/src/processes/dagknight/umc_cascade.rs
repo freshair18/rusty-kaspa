@@ -92,8 +92,8 @@ impl CascadeMaintainer {
         }
     }
 
-    /// Insert a new blue block into the chain decomposition and stabilize cascade.
-    pub fn add_blue(&mut self, block: BlockWithWork, reachability: &impl ReachabilityService) {
+    /// Insert a new blue block into the chain decomposition
+    fn add_blue(&mut self, block: BlockWithWork, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
         let initial_score = SignedWork::from(self.deficit_work);
         let initial_bucket = bucket_for_score(initial_score);
 
@@ -109,13 +109,13 @@ impl CascadeMaintainer {
 
         // A new blue block contributes according to its initial bucket.
         let initial_contribution = work_delta(block.work, initial_bucket);
-        self.process_event(block.hash, initial_contribution, reachability);
+        events.push(block.hash, initial_contribution);
     }
 
     /// Add a new red block and propagate its negative work to ancestor blues.
-    pub fn add_red(&mut self, block: BlockWithWork, reachability: &impl ReachabilityService) {
+    fn add_red(&mut self, block: BlockWithWork, events: &mut CascadeEvents) {
         self.red_work = self.red_work + block.work;
-        self.process_event(block.hash, work_delta(block.work, Bucket::Negative), reachability);
+        events.push(block.hash, work_delta(block.work, Bucket::Negative));
     }
 
     /// Returns the aggregate score of the virtual block.
@@ -233,35 +233,62 @@ impl CascadeMaintainer {
 
     // ----- Event processing -----
 
-    fn process_event(&mut self, source: Hash, delta: SignedWork, reachability: &impl ReachabilityService) {
-        let mut queue = Vec::new();
+    fn process_positive_events(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+        while let Some((source, delta)) = events.positive.pop_front() {
+            self.apply_event(source, delta, reachability);
+            while let Some((chain_id, block)) = self
+                .chains_score_trees
+                .iter()
+                .enumerate()
+                .find_map(|(chain_id, tree)| tree.extract_negative_at_least_zero().map(|block| (chain_id, block)))
+            {
+                self.chains_score_trees[chain_id].flip_to_positive(block);
+                self.negative_blue_work = self.negative_blue_work - block.work;
+                self.flip_count += 1;
+                events.push(block.hash, work_delta(block.work * 2u64, Bucket::Positive));
+            }
+        }
+    }
 
-        self.apply_event(source, delta, reachability);
+    fn apply_direct_red_effects(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+        debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
 
-        // Extract crossings and propagate
-        let mut changed = true;
-        while changed {
-            changed = false;
+        // These are the direct effects of all reds in the current mergeset. They
+        // are inherent to the mergeset, so apply every one before examining any
+        // consequent negative crossing.
+        while let Some((source, delta)) = events.negative.pop_front() {
+            self.apply_event(source, delta, reachability);
+        }
+    }
 
-            for tree in self.chains_score_trees.iter_mut() {
-                while let Some(block) = tree.extract_positive_below_zero() {
-                    tree.flip_to_negative(block);
-                    self.negative_blue_work = self.negative_blue_work + block.work;
-                    self.flip_count += 1;
-                    queue.push((block.hash, work_delta(block.work * 2u64, Bucket::Negative)));
-                    changed = true;
+    fn process_negative_crossings(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+        debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
+
+        loop {
+            while let Some((chain_id, block)) = self
+                .chains_score_trees
+                .iter()
+                .enumerate()
+                .find_map(|(chain_id, tree)| tree.extract_positive_below_zero().map(|block| (chain_id, block)))
+            {
+                // TODO: stop before processing this crossing when it is in the forbidden zone.
+                let crossing_is_allowed = true;
+                if !crossing_is_allowed {
+                    return;
                 }
-
-                while let Some(block) = tree.extract_negative_at_least_zero() {
-                    tree.flip_to_positive(block);
-                    self.negative_blue_work = self.negative_blue_work - block.work;
-                    self.flip_count += 1;
-                    queue.push((block.hash, work_delta(block.work * 2u64, Bucket::Positive)));
-                    changed = true;
-                }
+                self.chains_score_trees[chain_id].flip_to_negative(block);
+                self.negative_blue_work = self.negative_blue_work + block.work;
+                self.flip_count += 1;
+                events.push(block.hash, work_delta(block.work * 2u64, Bucket::Negative));
             }
 
-            for (source, delta) in queue.drain(..) {
+            if events.negative.is_empty() {
+                break;
+            }
+
+            // Every queued event belongs to a flip already committed in this
+            // round, so propagate the complete batch before checking again.
+            while let Some((source, delta)) = events.negative.pop_front() {
                 self.apply_event(source, delta, reachability);
             }
         }
@@ -370,28 +397,13 @@ pub fn run_cascade(
     } else {
         CascadeMaintainer::new(conflict_genesis, k)
     };
-
     // Process remaining mergesets (pop from bottom = CG-first, upward)
     while let Some(mergeset) = mergeset_stack.pop() {
-        // Process blues first (already in topological order)
-        for (hash, work) in mergeset.mergeset_blues {
-            let block_with_work = BlockWithWork::new(hash, work);
-            maintainer.add_blue(block_with_work, reachability);
-            voting_blocks += 1;
-        }
-
-        // Then process reds (already in topological order, skip grays)
-        for (hash, work) in mergeset.mergeset_reds {
-            let is_gray = reachability.is_chain_ancestor_of(next_chain_ancestor, hash);
-            if !is_gray {
-                let block_with_work = BlockWithWork::new(hash, work);
-                maintainer.add_red(block_with_work, reachability);
-                voting_blocks += 1;
-            }
-        }
+        let chain_block = mergeset.merging_chain_block;
+        voting_blocks += process_mergeset(&mut maintainer, mergeset, next_chain_ancestor, reachability);
 
         // Checkpoint at chain block — persist to store (best-effort)
-        if let Some(chain_block) = mergeset.merging_chain_block {
+        if let Some(chain_block) = chain_block {
             let _ = maintainer.save_state(
                 conflict_genesis.hash,
                 k,
@@ -404,7 +416,7 @@ pub fn run_cascade(
     }
 
     let cascade_score = maintainer.cascade_score();
-    let accepted = cascade_score >= SignedWork::zero();
+    let accepted = maintainer.virtual_accepts();
 
     CascadeResult {
         cascade_score,
@@ -417,7 +429,37 @@ pub fn run_cascade(
     }
 }
 
-// ============================================================================
+/// Process one mergeset in protocol order.
+///
+/// Blue effects are fully stabilized first. All direct red effects are then
+/// applied, followed by the negative event cascade, until stoppage
+fn process_mergeset(
+    maintainer: &mut CascadeMaintainer,
+    mergeset: Mergeset,
+    next_chain_ancestor: Hash,
+    reachability: &impl ReachabilityService,
+) -> u64 {
+    let mut events = CascadeEvents::new();
+    let mut voting_blocks = 0u64;
+
+    for (hash, work) in mergeset.mergeset_blues {
+        maintainer.add_blue(BlockWithWork::new(hash, work), reachability, &mut events);
+        voting_blocks += 1;
+    }
+    maintainer.process_positive_events(reachability, &mut events);
+
+    for (hash, work) in mergeset.mergeset_reds {
+        if !reachability.is_chain_ancestor_of(next_chain_ancestor, hash) {
+            maintainer.add_red(BlockWithWork::new(hash, work), &mut events);
+            voting_blocks += 1;
+        }
+    }
+
+    maintainer.apply_direct_red_effects(reachability, &mut events);
+    maintainer.process_negative_crossings(reachability, &mut events);
+    voting_blocks
+}
+
 // Segment Tree UMC Voter
 // ============================================================================
 
@@ -457,7 +499,6 @@ impl<O: HeaderStoreReader + 'static, E: UmcCascadeStore + Clone + 'static, R: Re
         let virtual_gd = ctx.virtual_gd;
         let k = ctx.k;
         let coloring_reader = ctx.coloring_reader;
-
         let next_chain_ancestor_of_subgroup = self.reachability_service.get_next_chain_ancestor(subgroup[0], conflict_genesis);
 
         // Collect blues and reds by traversing virtual GD chain backward.
