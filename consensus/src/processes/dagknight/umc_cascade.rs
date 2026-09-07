@@ -34,6 +34,7 @@ pub struct CascadeMaintainer {
     negative_blue_work: BlueWorkType,
     /// Total bucket flips observed during cascade stabilization
     flip_count: u64,
+    next_chain_ancestor: Hash,
 }
 
 /// A block identifier paired with that block's own proof-of-work contribution.
@@ -78,7 +79,7 @@ impl CascadeEvents {
 
 impl CascadeMaintainer {
     /// Initializes the cascade with `floor(sqrt(k))` conflict-genesis work as its voting deficit.
-    pub fn new(conflict_genesis: BlockWithWork, k: KType) -> Self {
+    pub fn new(conflict_genesis: BlockWithWork, k: KType, next_chain_ancestor: Hash) -> Self {
         let deficit_work = conflict_genesis.work * u64::from(k.isqrt());
         Self {
             blues_chains_decomposition: Vec::new(),
@@ -89,6 +90,7 @@ impl CascadeMaintainer {
             red_work: BlueWorkType::ZERO,
             negative_blue_work: BlueWorkType::ZERO,
             flip_count: 0,
+            next_chain_ancestor,
         }
     }
 
@@ -173,8 +175,13 @@ impl CascadeMaintainer {
     }
 
     /// Restore cascade state from a persisted checkpoint.
-    pub fn from_persisted_state(persisted: &UmcCascadePersistedState, conflict_genesis: BlockWithWork, k: KType) -> Self {
-        let mut maintainer = Self::new(conflict_genesis, k);
+    pub fn from_persisted_state(
+        persisted: &UmcCascadePersistedState,
+        conflict_genesis: BlockWithWork,
+        k: KType,
+        next_chain_ancestor: Hash,
+    ) -> Self {
+        let mut maintainer = Self::new(conflict_genesis, k, next_chain_ancestor);
 
         // Override counters from persisted state
         maintainer.deficit_work = persisted.deficit_work;
@@ -308,13 +315,12 @@ impl CascadeMaintainer {
         &mut self,
         conflict_genesis: Hash,
         k: KType,
-        next_chain_ancestor: Hash,
         chain_block: Hash,
         voting_blocks: u64,
         cascade_store: Arc<dyn UmcCascadeStore>,
     ) -> Result<(), StoreError> {
         let persisted_state = self.to_persisted_state(voting_blocks);
-        let key = UmcCascadeKey::new(conflict_genesis, k, next_chain_ancestor, chain_block);
+        let key = UmcCascadeKey::new(conflict_genesis, k, self.next_chain_ancestor, chain_block);
         cascade_store.insert_checkpoint(key, persisted_state)
     }
 }
@@ -393,25 +399,19 @@ pub fn run_cascade(
     // Restore from checkpoint or start fresh
     let mut maintainer = if let Some(persisted) = checkpoint_state {
         voting_blocks = persisted.voting_blocks;
-        CascadeMaintainer::from_persisted_state(&persisted, conflict_genesis, k)
+        CascadeMaintainer::from_persisted_state(&persisted, conflict_genesis, k, next_chain_ancestor)
     } else {
-        CascadeMaintainer::new(conflict_genesis, k)
+        CascadeMaintainer::new(conflict_genesis, k, next_chain_ancestor)
     };
+
     // Process remaining mergesets (pop from bottom = CG-first, upward)
     while let Some(mergeset) = mergeset_stack.pop() {
         let chain_block = mergeset.merging_chain_block;
-        voting_blocks += process_mergeset(&mut maintainer, mergeset, next_chain_ancestor, reachability);
+        voting_blocks += process_mergeset(&mut maintainer, mergeset, reachability);
 
         // Checkpoint at chain block — persist to store (best-effort)
         if let Some(chain_block) = chain_block {
-            let _ = maintainer.save_state(
-                conflict_genesis.hash,
-                k,
-                next_chain_ancestor,
-                chain_block,
-                voting_blocks,
-                cascade_store.clone(),
-            );
+            let _ = maintainer.save_state(conflict_genesis.hash, k, chain_block, voting_blocks, cascade_store.clone());
         }
     }
 
@@ -433,12 +433,7 @@ pub fn run_cascade(
 ///
 /// Blue effects are fully stabilized first. All direct red effects are then
 /// applied, followed by the negative event cascade, until stoppage
-fn process_mergeset(
-    maintainer: &mut CascadeMaintainer,
-    mergeset: Mergeset,
-    next_chain_ancestor: Hash,
-    reachability: &impl ReachabilityService,
-) -> u64 {
+fn process_mergeset(maintainer: &mut CascadeMaintainer, mergeset: Mergeset, reachability: &impl ReachabilityService) -> u64 {
     let mut events = CascadeEvents::new();
     let mut voting_blocks = 0u64;
 
@@ -449,7 +444,7 @@ fn process_mergeset(
     maintainer.process_positive_events(reachability, &mut events);
 
     for (hash, work) in mergeset.mergeset_reds {
-        if !reachability.is_chain_ancestor_of(next_chain_ancestor, hash) {
+        if !reachability.is_chain_ancestor_of(maintainer.next_chain_ancestor, hash) {
             maintainer.add_red(BlockWithWork::new(hash, work), &mut events);
             voting_blocks += 1;
         }
