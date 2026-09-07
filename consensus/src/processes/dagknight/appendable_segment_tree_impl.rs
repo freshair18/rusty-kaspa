@@ -54,10 +54,6 @@ struct ScoreCandidate<T, S> {
 
 #[derive(Clone, Debug)]
 struct BucketExtrema<T, S> {
-    /// Minimum score across all leaves, independent of bucket membership.
-    ///
-    /// This remains accurate even when a leaf's stored bucket is stale because a
-    /// threshold crossing is waiting to be processed.
     min_score: Option<ScoreCandidate<T, S>>,
     min_positive: Option<ScoreCandidate<T, S>>,
     max_negative: Option<ScoreCandidate<T, S>>,
