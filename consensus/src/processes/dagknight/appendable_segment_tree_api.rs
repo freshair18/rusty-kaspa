@@ -10,7 +10,11 @@ pub enum Bucket {
     Negative,
 }
 
-/// Assigns non-negative scores to the positive bucket and negative scores to the negative bucket.
+/// Returns the canonical initial bucket for a score.
+///
+/// A tree leaf can temporarily be stored in the opposite bucket while a threshold
+/// crossing is pending processing, so this function does not describe every leaf's
+/// current stored bucket.
 pub fn bucket_for_score<S: PartialOrd + Zero>(score: S) -> Bucket {
     if score >= S::zero() { Bucket::Positive } else { Bucket::Negative }
 }
@@ -26,6 +30,7 @@ pub fn bucket_for_score<S: PartialOrd + Zero>(score: S) -> Bucket {
 /// - `range_add`: O(log n)
 /// - `has_positive_below_zero`: O(1)
 /// - `has_negative_at_least_zero`: O(1)
+/// - `has_negative_score_in_prefix`: O(log n)
 /// - `extract_positive_below_zero`: O(1)
 /// - `extract_negative_at_least_zero`: O(1)
 /// - `flip_to_negative`: O(log n)
@@ -46,14 +51,17 @@ where
     where
         Self: Sized;
 
-    /// Appends a leaf after all threshold crossings produced by earlier updates have been consumed.
-    /// Implementations may reject an append while an unconsumed crossing remains.
+    /// Appends a leaf while preserving any threshold crossings already pending in the tree.
     fn append_leaf(&mut self, leaf: T, initial_score: S);
     fn prefix_add(&mut self, prefix_length: usize, delta: S);
     fn range_add(&mut self, range: Range<usize>, delta: S);
 
     fn has_positive_below_zero(&self) -> bool;
     fn has_negative_at_least_zero(&self) -> bool;
+    /// Whether any leaf in the prefix has a negative score, regardless of bucket membership.
+    ///
+    /// This may materialize lazy deltas along visited paths, hence the mutable receiver.
+    fn has_negative_score_in_prefix(&mut self, prefix_length: usize) -> bool;
 
     fn extract_positive_below_zero(&self) -> Option<T>;
     fn extract_negative_at_least_zero(&self) -> Option<T>;

@@ -54,6 +54,11 @@ struct ScoreCandidate<T, S> {
 
 #[derive(Clone, Debug)]
 struct BucketExtrema<T, S> {
+    /// Minimum score across all leaves, independent of bucket membership.
+    ///
+    /// This remains accurate even when a leaf's stored bucket is stale because a
+    /// threshold crossing is waiting to be processed.
+    min_score: Option<ScoreCandidate<T, S>>,
     min_positive: Option<ScoreCandidate<T, S>>,
     max_negative: Option<ScoreCandidate<T, S>>,
     pending_delta: S,
@@ -65,19 +70,30 @@ where
     S: Copy + PartialOrd + AddAssign + Zero,
 {
     fn empty() -> Self {
-        Self { min_positive: None, max_negative: None, pending_delta: S::zero() }
+        Self { min_score: None, min_positive: None, max_negative: None, pending_delta: S::zero() }
+    }
+
+    /// Restores a leaf together with its stored bucket. The bucket is intentionally
+    /// not recomputed from `score`, because a pending crossing may make them disagree.
+    fn restore_leaf_with_bucket(leaf: T, score: S, bucket: Bucket) -> Self {
+        let candidate = ScoreCandidate { score, leaf };
+        match bucket {
+            Bucket::Positive => {
+                Self { min_score: Some(candidate), min_positive: Some(candidate), max_negative: None, pending_delta: S::zero() }
+            }
+            Bucket::Negative => {
+                Self { min_score: Some(candidate), min_positive: None, max_negative: Some(candidate), pending_delta: S::zero() }
+            }
+        }
     }
 
     fn create_leaf_with_score(leaf: T, score: S) -> Self {
-        let candidate = Some(ScoreCandidate { score, leaf });
-        match bucket_for_score(score) {
-            Bucket::Positive => Self { min_positive: candidate, max_negative: None, pending_delta: S::zero() },
-            Bucket::Negative => Self { min_positive: None, max_negative: candidate, pending_delta: S::zero() },
-        }
+        Self::restore_leaf_with_bucket(leaf, score, bucket_for_score(score))
     }
 
     fn merge(left_child: &Self, right_child: &Self) -> Self {
         Self {
+            min_score: minimum_candidate(left_child.min_score, right_child.min_score),
             min_positive: minimum_candidate(left_child.min_positive, right_child.min_positive),
             max_negative: maximum_candidate(left_child.max_negative, right_child.max_negative),
             pending_delta: S::zero(),
@@ -85,6 +101,9 @@ where
     }
 
     fn apply_delta(&mut self, delta: S) {
+        if let Some(candidate) = self.min_score.as_mut() {
+            candidate.score += delta;
+        }
         if let Some(candidate) = self.min_positive.as_mut() {
             candidate.score += delta;
         }
@@ -130,9 +149,8 @@ fn maximum_candidate<T: Copy, S: Copy + PartialOrd>(
 /// - positive score dropping below 0
 /// - negative score rising to at least 0
 ///
-/// Invariant: callers must consume every crossing produced by prior updates before appending
-/// another leaf. Consequently, all bucket memberships agree with their scores whenever growth
-/// can occur.
+/// Bucket memberships may temporarily disagree with scores while threshold crossings are
+/// pending; extraction exposes those crossings and flipping restores the bucket invariant.
 pub struct AppendableSegmentTree<T, S = i64> {
     len: usize,
     leaf_capacity: usize,
@@ -163,12 +181,10 @@ where
         Self { len: 0, leaf_capacity, position_by_leaf: HashMap::new(), nodes: vec![BucketExtrema::empty(); node_count] }
     }
 
-    /// Append a new leaf after every crossing produced by earlier updates has been consumed.
+    /// Append a new leaf while preserving any crossings produced by earlier updates.
     /// The initial bucket is inferred from `initial_score`.
     pub fn append_leaf(&mut self, leaf: T, initial_score: S) {
         assert!(!self.position_by_leaf.contains_key(&leaf), "leaf already present");
-        assert!(!self.has_unconsumed_crossings(), "consume all threshold crossings before appending a leaf");
-
         if self.len == self.leaf_capacity {
             self.grow();
         }
@@ -202,6 +218,11 @@ where
 
     pub fn has_negative_at_least_zero(&self) -> bool {
         self.root().max_negative.is_some_and(|candidate| candidate.score >= S::zero())
+    }
+
+    pub fn has_negative_score_in_prefix(&mut self, prefix_length: usize) -> bool {
+        assert!(prefix_length <= self.len, "prefix exceeds tree length");
+        self.has_negative_score_in_range(ROOT_NODE, self.full_leaf_range(), 0..prefix_length)
     }
 
     pub fn extract_positive_below_zero(&self) -> Option<T> {
@@ -245,8 +266,18 @@ where
     // Internal queries and bucket transitions
     // ---------------------------------------------------------------------
 
-    fn has_unconsumed_crossings(&self) -> bool {
-        self.has_positive_below_zero() || self.has_negative_at_least_zero()
+    fn has_negative_score_in_range(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, query: Range<LeafPosition>) -> bool {
+        if ranges_are_disjoint(&node_range, &query) {
+            return false;
+        }
+        if range_fully_contains(&query, &node_range) {
+            return self.nodes[node].min_score.is_some_and(|candidate| candidate.score < S::zero());
+        }
+
+        self.push_pending_delta(node);
+        let (left_child_range, right_child_range) = split_range(&node_range);
+        self.has_negative_score_in_range(left_child(node), left_child_range, query.clone())
+            || self.has_negative_score_in_range(right_child(node), right_child_range, query)
     }
 
     fn point_score(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, target_position: LeafPosition) -> S {
@@ -402,14 +433,13 @@ where
     }
 
     fn grow(&mut self) {
-        debug_assert!(!self.has_unconsumed_crossings(), "growth requires a crossingless tree");
         let leaves = self.materialized_leaves();
-        self.leaf_capacity *= 2;
+        self.leaf_capacity = self.leaf_capacity.checked_mul(2).expect("segment tree capacity is too large");
         self.nodes = vec![BucketExtrema::empty(); 2 * self.leaf_capacity];
 
-        for (position, candidate) in leaves {
+        for (position, candidate, bucket) in leaves {
             let node = self.leaf_node(position);
-            self.nodes[node] = BucketExtrema::create_leaf_with_score(candidate.leaf, candidate.score);
+            self.nodes[node] = BucketExtrema::restore_leaf_with_bucket(candidate.leaf, candidate.score, bucket);
         }
 
         for node in (ROOT_NODE..self.leaf_capacity).rev() {
@@ -418,15 +448,14 @@ where
     }
 
     /// Flush lazy updates and snapshot the occupied leaves with their stable logical positions.
-    fn materialized_leaves(&mut self) -> Vec<(LeafPosition, ScoreCandidate<T, S>)> {
+    fn materialized_leaves(&mut self) -> Vec<(LeafPosition, ScoreCandidate<T, S>, Bucket)> {
         self.materialize_subtree_deltas(ROOT_NODE, self.full_leaf_range());
         self.position_by_leaf
             .iter()
             .map(|(&leaf, &position)| {
                 let (candidate, bucket) = self.bucketed_leaf_candidate_at(position);
                 debug_assert!(candidate.leaf == leaf);
-                debug_assert_eq!(bucket, bucket_for_score(candidate.score), "growth requires score-aligned buckets");
-                (position, candidate)
+                (position, candidate, bucket)
             })
             .collect()
     }
@@ -472,6 +501,10 @@ where
 
     fn has_negative_at_least_zero(&self) -> bool {
         AppendableSegmentTree::has_negative_at_least_zero(self)
+    }
+
+    fn has_negative_score_in_prefix(&mut self, prefix_length: usize) -> bool {
+        AppendableSegmentTree::has_negative_score_in_prefix(self, prefix_length)
     }
 
     fn extract_positive_below_zero(&self) -> Option<T> {
@@ -618,16 +651,6 @@ mod tests {
         tree.append_leaf(1, 5);
         tree.prefix_add(0, -100);
         assert_eq!(tree.score(1), 5);
-    }
-
-    #[test]
-    #[should_panic(expected = "consume all threshold crossings before appending a leaf")]
-    fn test_append_requires_crossingless_tree() {
-        let mut tree = AppendableSegmentTree::<u64>::new();
-        tree.append_leaf(1, 0);
-        tree.prefix_add(1, -1);
-
-        tree.append_leaf(2, 0);
     }
 
     #[test]
