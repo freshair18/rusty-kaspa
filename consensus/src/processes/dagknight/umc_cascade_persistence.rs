@@ -87,6 +87,8 @@ pub struct UmcCascadePersistedState {
     pub blues_chains_decomposition: Vec<Vec<Hash>>,
     pub chains_leaves: Vec<Vec<ChainLeafEntry>>,
     pub blk_mapping_to_chains: HashMap<Hash, usize>,
+    /// Oldest chain block still covered by the depth restriction.
+    pub depth_limit_ancestor: Hash,
     pub deficit_work: Uint192,
     pub blue_work: Uint192,
     pub red_work: Uint192,

@@ -14,7 +14,7 @@ use crate::model::stores::reachability::ReachabilityStoreReader;
 use crate::processes::dagknight::umc_cascade_persistence::{
     ChainLeafEntry, Mergeset, UmcCascadeKey, UmcCascadePersistedState, UmcCascadeStore,
 };
-use crate::processes::dagknight::umc_voting::{CascadeResult, SignedWork, UmcVoter, UmcVotingContext};
+use crate::processes::dagknight::umc_voting::{CascadeResult, ColoringReader, SignedWork, UmcVoter, UmcVotingContext};
 use crate::processes::dagknight::{AppendableSegmentTree, Bucket, bucket_for_score};
 use crate::processes::difficulty::calc_work;
 
@@ -25,6 +25,7 @@ use crate::processes::difficulty::calc_work;
 /// Maintains exact cascade scores for one fixed k using chain decomposition
 /// and lazy segment trees with event-driven bucket-transition propagation.
 pub struct CascadeMaintainer {
+    k: KType,
     blues_chains_decomposition: Vec<Vec<Hash>>,
     chains_score_trees: Vec<AppendableSegmentTree<BlockWithWork, SignedWork>>,
     blk_mapping_to_chains: HashMap<Hash, usize>,
@@ -34,6 +35,7 @@ pub struct CascadeMaintainer {
     negative_blue_work: BlueWorkType,
     /// Total bucket flips observed during cascade stabilization
     flip_count: u64,
+    depth_limit_ancestor: Hash,
     next_chain_ancestor: Hash,
 }
 
@@ -82,6 +84,7 @@ impl CascadeMaintainer {
     pub fn new(conflict_genesis: BlockWithWork, k: KType, next_chain_ancestor: Hash) -> Self {
         let deficit_work = conflict_genesis.work * u64::from(k.isqrt());
         Self {
+            k,
             blues_chains_decomposition: Vec::new(),
             chains_score_trees: Vec::new(),
             blk_mapping_to_chains: HashMap::new(),
@@ -90,6 +93,7 @@ impl CascadeMaintainer {
             red_work: BlueWorkType::ZERO,
             negative_blue_work: BlueWorkType::ZERO,
             flip_count: 0,
+            depth_limit_ancestor: conflict_genesis.hash,
             next_chain_ancestor,
         }
     }
@@ -132,6 +136,22 @@ impl CascadeMaintainer {
         self.cascade_score() >= SignedWork::zero()
     }
 
+    fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(
+        &mut self,
+        merging_block: Hash,
+        coloring_reader: &C,
+        reachability: &impl ReachabilityService,
+    ) {
+        let merging_blue_score = coloring_reader.get_coloring_data(merging_block).blue_score;
+        let mut bound_blue_score = coloring_reader.get_coloring_data(self.depth_limit_ancestor).blue_score;
+        let max_depth = u64::from(self.k).pow(4);
+
+        while merging_blue_score.saturating_sub(bound_blue_score) > max_depth {
+            self.depth_limit_ancestor = reachability.get_next_chain_ancestor(merging_block, self.depth_limit_ancestor);
+            bound_blue_score = coloring_reader.get_coloring_data(self.depth_limit_ancestor).blue_score;
+        }
+    }
+
     /// Returns the total number of bucket flips observed during cascade stabilization.
     pub fn flip_count(&self) -> u64 {
         self.flip_count
@@ -165,6 +185,7 @@ impl CascadeMaintainer {
             blues_chains_decomposition: self.blues_chains_decomposition.clone(),
             chains_leaves,
             blk_mapping_to_chains: self.blk_mapping_to_chains.clone(),
+            depth_limit_ancestor: self.depth_limit_ancestor,
             deficit_work: self.deficit_work,
             blue_work: self.blue_work,
             red_work: self.red_work,
@@ -189,6 +210,7 @@ impl CascadeMaintainer {
         maintainer.red_work = persisted.red_work;
         maintainer.negative_blue_work = persisted.negative_blue_work;
         maintainer.flip_count = persisted.flip_count;
+        maintainer.depth_limit_ancestor = persisted.depth_limit_ancestor;
 
         // Restore chains and trees
         maintainer.blues_chains_decomposition = persisted.blues_chains_decomposition.clone();
@@ -382,7 +404,7 @@ fn strict_ancestor_index(chain: &[Hash], source: Hash, reachability: &impl Reach
 /// `estimated_effort_saved` is the estimated number of blue blocks skipped by checkpointing
 /// (caller's responsibility to calculate from virtual_gd.blue_score - checkpoint_blue_score).
 /// `estimated_effort_total` is virtual_gd.blue_score (total blues in the conflict zone).
-pub fn run_cascade(
+pub fn run_cascade<C: ColoringReader + ?Sized>(
     mut mergeset_stack: Vec<Mergeset>,
     conflict_genesis: BlockWithWork,
     k: KType,
@@ -392,6 +414,7 @@ pub fn run_cascade(
     checkpoint_state: Option<UmcCascadePersistedState>,
     estimated_effort_saved: u64,
     estimated_effort_total: u64,
+    coloring_reader: &C,
 ) -> CascadeResult {
     let mut voting_blocks = 0u64;
     let from_checkpoint = checkpoint_state.is_some();
@@ -407,7 +430,7 @@ pub fn run_cascade(
     // Process remaining mergesets (pop from bottom = CG-first, upward)
     while let Some(mergeset) = mergeset_stack.pop() {
         let chain_block = mergeset.merging_chain_block;
-        voting_blocks += process_mergeset(&mut maintainer, mergeset, reachability);
+        voting_blocks += process_mergeset(&mut maintainer, mergeset, reachability, coloring_reader);
 
         // Checkpoint at chain block — persist to store (best-effort)
         if let Some(chain_block) = chain_block {
@@ -433,7 +456,19 @@ pub fn run_cascade(
 ///
 /// Blue effects are fully stabilized first. All direct red effects are then
 /// applied, followed by the negative event cascade, until stoppage
-fn process_mergeset(maintainer: &mut CascadeMaintainer, mergeset: Mergeset, reachability: &impl ReachabilityService) -> u64 {
+fn process_mergeset<C: ColoringReader + ?Sized>(
+    maintainer: &mut CascadeMaintainer,
+    mergeset: Mergeset,
+    reachability: &impl ReachabilityService,
+    coloring_reader: &C,
+) -> u64 {
+    // The virtual mergeset has no concrete merging-block hash. It is processed
+    // immediately after its selected parent's mergeset, so the bound already
+    // reflects the latest concrete chain block.
+    if let Some(merging_block) = mergeset.merging_chain_block {
+        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader, reachability);
+    }
+
     let mut events = CascadeEvents::new();
     let mut voting_blocks = 0u64;
 
@@ -556,6 +591,7 @@ impl<O: HeaderStoreReader + 'static, E: UmcCascadeStore + Clone + 'static, R: Re
             checkpoint_state,
             estimated_effort_saved,
             estimated_effort_total,
+            coloring_reader,
         )
     }
 }
