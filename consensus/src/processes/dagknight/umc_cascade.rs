@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use kaspa_consensus_core::{BlueWorkType, KType};
@@ -54,6 +54,25 @@ fn work_delta(work: BlueWorkType, bucket: Bucket) -> SignedWork {
     match bucket {
         Bucket::Positive => magnitude,
         Bucket::Negative => SignedWork::zero() - magnitude,
+    }
+}
+
+struct CascadeEvents {
+    positive: VecDeque<(Hash, SignedWork)>,
+    negative: VecDeque<(Hash, SignedWork)>,
+}
+
+impl CascadeEvents {
+    fn new() -> Self {
+        Self { positive: VecDeque::new(), negative: VecDeque::new() }
+    }
+
+    fn push(&mut self, source: Hash, delta: SignedWork) {
+        if delta >= SignedWork::zero() {
+            self.positive.push_back((source, delta));
+        } else {
+            self.negative.push_back((source, delta));
+        }
     }
 }
 
