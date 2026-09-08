@@ -25,7 +25,6 @@ use crate::processes::difficulty::calc_work;
 /// Maintains exact cascade scores for one fixed k using chain decomposition
 /// and lazy segment trees with event-driven bucket-transition propagation.
 pub struct CascadeMaintainer {
-    k: KType,
     blues_chains_decomposition: Vec<Vec<Hash>>,
     chains_score_trees: Vec<AppendableSegmentTree<BlockWithWork, SignedWork>>,
     blk_mapping_to_chains: HashMap<Hash, usize>,
@@ -35,6 +34,7 @@ pub struct CascadeMaintainer {
     negative_blue_work: BlueWorkType,
     /// Total bucket flips observed during cascade stabilization
     flip_count: u64,
+    bound_depth: u64,
     depth_limit_ancestor: Hash,
     next_chain_ancestor: Hash,
 }
@@ -84,7 +84,6 @@ impl CascadeMaintainer {
     pub fn new(conflict_genesis: BlockWithWork, k: KType, next_chain_ancestor: Hash) -> Self {
         let deficit_work = conflict_genesis.work * u64::from(k.isqrt());
         Self {
-            k,
             blues_chains_decomposition: Vec::new(),
             chains_score_trees: Vec::new(),
             blk_mapping_to_chains: HashMap::new(),
@@ -93,6 +92,7 @@ impl CascadeMaintainer {
             red_work: BlueWorkType::ZERO,
             negative_blue_work: BlueWorkType::ZERO,
             flip_count: 0,
+            bound_depth: u64::from(k).pow(4)+1,
             depth_limit_ancestor: conflict_genesis.hash,
             next_chain_ancestor,
         }
@@ -136,27 +136,26 @@ impl CascadeMaintainer {
         self.cascade_score() >= SignedWork::zero()
     }
 
-    /// finds the first chain ancestor of the merging block, that is more than k^4 blue score away from it
+    /// finds the first chain ancestor of the merging block, that is more than k^4 blue score away from its selected parent
     fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(
         &mut self,
-        merging_block: Hash,
+        merger_selected_parent: Hash,
+        merger_blue_score: u64,
         coloring_reader: &C,
         reachability: &impl ReachabilityService,
     ) {
-        let merging_blue_score = coloring_reader.get_coloring_data(merging_block).blue_score;
-        let max_depth = u64::from(self.k).pow(4);
-        let mut bound = self.depth_limit_ancestor;
+        let mut curr_bound = self.depth_limit_ancestor;
 
-        while bound != merging_block {
-            let next_bound = reachability.get_next_chain_ancestor(merging_block, bound);
-            let next_distance = merging_blue_score.saturating_sub(coloring_reader.get_coloring_data(next_bound).blue_score);
-            if next_distance < max_depth {
+        while curr_bound != merger_selected_parent {
+            let next_bound = reachability.get_next_chain_ancestor(merger_selected_parent, curr_bound);
+            let next_distance = merger_blue_score.saturating_sub(coloring_reader.get_coloring_data(next_bound).blue_score);
+            if next_distance < self.bound_depth {
                 break;
             }
-            bound = next_bound;
+            curr_bound = next_bound;
         }
 
-        self.depth_limit_ancestor = bound;
+        self.depth_limit_ancestor = curr_bound;
     }
 
     fn violates_depth_restriction(&mut self, reachability: &impl ReachabilityService) -> bool {
