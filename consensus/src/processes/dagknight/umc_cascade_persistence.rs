@@ -12,35 +12,39 @@ use kaspa_utils::mem_size::MemSizeEstimator;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 
+kaspa_hashes::blake2b_hasher! {
+    struct UmcCascadeMergesetHasher => b"UmcCascadeMergesetHash",
+}
+
 // ============================================================================
 // Persistence Key
 // ============================================================================
 
 /// Key for UMC cascade checkpoint persistence.
 ///
-/// Layout: conflict_genesis(32) || k(u16 BE) || next_chain_ancestor(32) || current_chain_block(32)
+/// Layout: conflict_genesis(32) || k(u16 BE) || next_chain_ancestor(32) || mergeset_hash(32)
 /// Total: 98 bytes
 ///
-/// K-coloring partition is fixed per chain block (determined at block creation time),
-/// so (CG, K, NCA, CB) uniquely identifies the checkpoint state.
+/// The mergeset hash commits to the merger's selected parent and its ordered blue
+/// and red mergesets, so checkpoints from different mergeset views cannot collide.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct UmcCascadeKey {
     pub conflict_genesis: Hash,
     pub k: KType,
     pub next_chain_ancestor: Hash,
-    pub current_chain_block: Hash,
+    pub mergeset_hash: Hash,
     /// Precomputed bytes
     bytes: [u8; 98],
 }
 
 impl UmcCascadeKey {
-    pub fn new(conflict_genesis: Hash, k: KType, next_chain_ancestor: Hash, current_chain_block: Hash) -> Self {
+    pub fn new(conflict_genesis: Hash, k: KType, next_chain_ancestor: Hash, mergeset_hash: Hash) -> Self {
         let mut bytes = [0u8; 98];
         bytes[..32].copy_from_slice(conflict_genesis.as_ref());
         bytes[32..34].copy_from_slice(&k.to_be_bytes());
         bytes[34..66].copy_from_slice(next_chain_ancestor.as_ref());
-        bytes[66..98].copy_from_slice(current_chain_block.as_ref());
-        Self { conflict_genesis, k, next_chain_ancestor, current_chain_block, bytes }
+        bytes[66..98].copy_from_slice(mergeset_hash.as_ref());
+        Self { conflict_genesis, k, next_chain_ancestor, mergeset_hash, bytes }
     }
 }
 
@@ -59,12 +63,43 @@ impl AsRef<[u8]> for UmcCascadeKey {
 /// A mergeset from one level of the virtual GD chain.
 #[derive(Debug, Clone)]
 pub struct Mergeset {
-    /// The chain block whose stored gd produced this mergeset (None for the virtual mergeset).
-    pub merging_chain_block: Option<Hash>,
+    /// The merger's selected parent. Together with `mergeset_blues`, this
+    /// determines the merger's blue score.
+    pub selected_parent: Hash,
     /// Blue blocks in this mergeset, assumed to be in topological order
     pub mergeset_blues: Vec<(Hash, BlueWorkType)>,
     /// Red blocks in this mergeset (may include grays - caller must filter), also assumed to be in topological order
     pub mergeset_reds: Vec<(Hash, BlueWorkType)>,
+}
+
+impl Mergeset {
+    /// Hash the complete GHOSTDAG mergeset view used to produce a checkpoint.
+    pub fn checkpoint_hash(&self) -> Hash {
+        Self::checkpoint_hash_from_hashes(
+            self.selected_parent,
+            self.mergeset_blues.iter().map(|(hash, _)| *hash),
+            self.mergeset_reds.iter().map(|(hash, _)| *hash),
+        )
+    }
+
+    /// Hash a GHOSTDAG mergeset view without constructing a `Mergeset`.
+    pub fn checkpoint_hash_from_hashes(
+        selected_parent: Hash,
+        blues: impl ExactSizeIterator<Item = Hash>,
+        reds: impl ExactSizeIterator<Item = Hash>,
+    ) -> Hash {
+        let mut hasher = UmcCascadeMergesetHasher::new();
+        hasher.write(selected_parent.as_ref());
+        hasher.write((blues.len() as u64).to_be_bytes());
+        for hash in blues {
+            hasher.write(hash.as_ref());
+        }
+        hasher.write((reds.len() as u64).to_be_bytes());
+        for hash in reds {
+            hasher.write(hash.as_ref());
+        }
+        hasher.finalize()
+    }
 }
 
 // ============================================================================

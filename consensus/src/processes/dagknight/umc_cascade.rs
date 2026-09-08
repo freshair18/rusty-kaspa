@@ -358,14 +358,11 @@ impl CascadeMaintainer {
     /// and save it to the persistence store
     pub fn save_state(
         &mut self,
-        conflict_genesis: Hash,
-        k: KType,
-        chain_block: Hash,
+        key: UmcCascadeKey,
         voting_blocks: u64,
         cascade_store: Arc<dyn UmcCascadeStore>,
     ) -> Result<(), StoreError> {
         let persisted_state = self.to_persisted_state(voting_blocks);
-        let key = UmcCascadeKey::new(conflict_genesis, k, self.next_chain_ancestor, chain_block);
         cascade_store.insert_checkpoint(key, persisted_state)
     }
 }
@@ -452,12 +449,14 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
 
     // Process remaining mergesets (pop from bottom = CG-first, upward)
     while let Some(mergeset) = mergeset_stack.pop() {
-        let chain_block = mergeset.merging_chain_block;
+        let checkpoint_key = (!mergeset_stack.is_empty()).then(|| {
+            UmcCascadeKey::new(conflict_genesis.hash, k, next_chain_ancestor, mergeset.checkpoint_hash())
+        });
         voting_blocks += process_mergeset(&mut maintainer, mergeset, reachability, coloring_reader);
 
         // Checkpoint at chain block — persist to store (best-effort)
-        if let Some(chain_block) = chain_block {
-            let _ = maintainer.save_state(conflict_genesis.hash, k, chain_block, voting_blocks, cascade_store.clone());
+        if let Some(checkpoint_key) = checkpoint_key {
+            let _ = maintainer.save_state(checkpoint_key, voting_blocks, cascade_store.clone());
         }
     }
 
@@ -485,12 +484,12 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
     reachability: &impl ReachabilityService,
     coloring_reader: &C,
 ) -> u64 {
-    // The virtual mergeset has no concrete merging-block hash. It is processed
-    // immediately after its selected parent's mergeset, so the bound already
-    // reflects the latest concrete chain block.
-    if let Some(merging_block) = mergeset.merging_chain_block {
-        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader, reachability);
-    }
+    let selected_parent = mergeset.selected_parent;
+    let merger_blue_score = coloring_reader.get_coloring_data(selected_parent).blue_score + mergeset.mergeset_blues.len() as u64;
+
+    // For the virtual mergeset, the bound uses the virtual blue score and its
+    // concrete selected parent as the chain endpoint.
+    maintainer.update_depth_limit_ancestor(selected_parent, merger_blue_score, coloring_reader, reachability);
 
     let mut events = CascadeEvents::new();
     let mut voting_blocks = 0u64;
@@ -557,34 +556,46 @@ impl<O: HeaderStoreReader + 'static, E: UmcCascadeStore + Clone + 'static, R: Re
         // Collect blues and reds by traversing virtual GD chain backward.
         // Build mergesets into a stack: Virtual first, then ChainN, ..., Chain1, CG last.
         let mut mergeset_stack: Vec<Mergeset> = Vec::new();
-        let mut merging_chain_block: Option<Hash> = None;
+        let mut checkpoint_merger_gd = None;
         let mut checkpoint_state: Option<UmcCascadePersistedState> = None;
 
         let virtual_blue_score = virtual_gd.blue_score;
         let mut curr_gd = Arc::new(virtual_gd.clone());
-
-        while merging_chain_block.is_none() || merging_chain_block.unwrap() != conflict_genesis {
+        loop {
+            let selected_parent = curr_gd.selected_parent;
             let blues: Vec<(Hash, BlueWorkType)> =
                 curr_gd.mergeset_blues.iter().map(|&h| (h, calc_work(self.headers_store.get_bits(h).unwrap()))).collect();
 
             let reds: Vec<(Hash, BlueWorkType)> =
                 curr_gd.mergeset_reds.iter().map(|&h| (h, calc_work(self.headers_store.get_bits(h).unwrap()))).collect();
 
-            mergeset_stack.push(Mergeset { merging_chain_block, mergeset_blues: blues, mergeset_reds: reds });
+            mergeset_stack.push(Mergeset { selected_parent, mergeset_blues: blues, mergeset_reds: reds });
 
-            merging_chain_block = Some(curr_gd.selected_parent);
-            curr_gd = coloring_reader.get_coloring_data(curr_gd.selected_parent);
-
+            let candidate_merger_gd = coloring_reader.get_coloring_data(selected_parent);
+            let state_key = UmcCascadeKey::new(
+                conflict_genesis,
+                k,
+                next_chain_ancestor_of_subgroup,
+                Mergeset::checkpoint_hash_from_hashes(
+                    candidate_merger_gd.selected_parent,
+                    candidate_merger_gd.mergeset_blues.iter().copied(),
+                    candidate_merger_gd.mergeset_reds.iter().copied(),
+                ),
+            );
             // Check if a checkpoint exists for the next chain block.
             // If found, break — run_cascade will reload from that state and skip
             // already-computed mergesets.
-            if let Some(cb) = merging_chain_block {
-                let state_key = UmcCascadeKey::new(conflict_genesis, k, next_chain_ancestor_of_subgroup, cb);
-                if let Ok(Some(existing_state)) = self.umc_persistence_store.get_checkpoint(state_key) {
-                    checkpoint_state = Some(existing_state);
-                    break;
-                }
+            if let Ok(Some(existing_state)) = self.umc_persistence_store.get_checkpoint(state_key) {
+                checkpoint_merger_gd = Some(candidate_merger_gd);
+                checkpoint_state = Some(existing_state);
+                break;
             }
+
+            if selected_parent == conflict_genesis {
+                break;
+            }
+
+            curr_gd = coloring_reader.get_coloring_data(selected_parent);
         }
 
         let from_checkpoint = checkpoint_state.is_some();
@@ -592,9 +603,7 @@ impl<O: HeaderStoreReader + 'static, E: UmcCascadeStore + Clone + 'static, R: Re
         let estimated_effort_saved = if from_checkpoint {
             // Estimate effort saved: virtual_blue_score - checkpoint_block.blue_score
             // This represents the blue blocks we didn't need to visit.
-            let checkpoint_block = merging_chain_block.unwrap();
-            let checkpoint_gd = coloring_reader.get_coloring_data(checkpoint_block);
-            checkpoint_gd.blue_score
+            checkpoint_merger_gd.expect("checkpoint state must have merger GHOSTDAG data").blue_score
         } else {
             0
         };
