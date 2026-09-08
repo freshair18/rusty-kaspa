@@ -79,6 +79,8 @@ pub struct ChainLeafEntry {
     /// Absolute score at checkpoint time (positive value + sign flag)
     pub score_abs: Uint192,
     pub score_negative: bool,
+    /// Cascade bucket at checkpoint time; pending crossings can make this differ from the score sign.
+    pub bucket_positive: bool,
 }
 
 /// Persisted checkpoint state for UMC cascade at a specific chain block.

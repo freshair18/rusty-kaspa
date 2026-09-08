@@ -180,6 +180,11 @@ where
     /// Append a new leaf while preserving any crossings produced by earlier updates.
     /// The initial bucket is inferred from `initial_score`.
     pub fn append_leaf(&mut self, leaf: T, initial_score: S) {
+        self.append_leaf_with_bucket(leaf, initial_score, bucket_for_score(initial_score));
+    }
+
+    /// Restore a leaf whose bucket may temporarily disagree with its score.
+    pub(crate) fn append_leaf_with_bucket(&mut self, leaf: T, initial_score: S, bucket: Bucket) {
         assert!(!self.position_by_leaf.contains_key(&leaf), "leaf already present");
         if self.len == self.leaf_capacity {
             self.grow();
@@ -190,8 +195,12 @@ where
         self.position_by_leaf.insert(leaf, position);
 
         let node = self.leaf_node(position);
-        self.nodes[node] = BucketExtrema::create_leaf_with_score(leaf, initial_score);
+        self.nodes[node] = BucketExtrema::restore_leaf_with_bucket(leaf, initial_score, bucket);
         self.recompute_ancestors_of(node);
+    }
+
+    pub(crate) fn bucket(&self, leaf: T) -> Bucket {
+        self.bucketed_leaf_candidate_at(self.position_of(leaf)).1
     }
 
     pub fn prefix_add(&mut self, prefix_length: usize, delta: S) {

@@ -136,20 +136,22 @@ impl CascadeMaintainer {
         self.cascade_score() >= SignedWork::zero()
     }
 
-    fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(
-        &mut self,
-        merging_block: Hash,
-        coloring_reader: &C,
-        reachability: &impl ReachabilityService,
-    ) {
+    fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(&mut self, merging_block: Hash, coloring_reader: &C) {
         let merging_blue_score = coloring_reader.get_coloring_data(merging_block).blue_score;
-        let mut bound_blue_score = coloring_reader.get_coloring_data(self.depth_limit_ancestor).blue_score;
         let max_depth = u64::from(self.k).pow(4);
+        let previous_bound = self.depth_limit_ancestor;
+        let mut bound = merging_block;
 
-        while merging_blue_score.saturating_sub(bound_blue_score) > max_depth {
-            self.depth_limit_ancestor = reachability.get_next_chain_ancestor(merging_block, self.depth_limit_ancestor);
-            bound_blue_score = coloring_reader.get_coloring_data(self.depth_limit_ancestor).blue_score;
+        while bound != previous_bound {
+            let parent = coloring_reader.get_coloring_data(bound).selected_parent;
+            let parent_blue_score = coloring_reader.get_coloring_data(parent).blue_score;
+            if merging_blue_score.saturating_sub(parent_blue_score) > max_depth {
+                break;
+            }
+            bound = parent;
         }
+
+        self.depth_limit_ancestor = bound;
     }
 
     fn violates_depth_restriction(&mut self, reachability: &impl ReachabilityService) -> bool {
@@ -181,11 +183,13 @@ impl CascadeMaintainer {
                 let score = tree.score(block_with_work);
                 let is_negative = score.negative();
                 let abs_score: Uint192 = score.abs();
+                let bucket_positive = tree.bucket(block_with_work) == Bucket::Positive;
                 chain_leaves.push(ChainLeafEntry {
                     hash: block_with_work.hash,
                     work: block_with_work.work,
                     score_abs: abs_score,
                     score_negative: is_negative,
+                    bucket_positive,
                 });
             }
             chains_leaves.push(chain_leaves);
@@ -238,7 +242,8 @@ impl CascadeMaintainer {
                 } else {
                     SignedWork::from(leaf_entry.score_abs)
                 };
-                temp_tree.append_leaf(block, score);
+                let bucket = if leaf_entry.bucket_positive { Bucket::Positive } else { Bucket::Negative };
+                temp_tree.append_leaf_with_bucket(block, score, bucket);
             }
 
             maintainer.chains_score_trees.push(temp_tree);
@@ -475,7 +480,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
     // immediately after its selected parent's mergeset, so the bound already
     // reflects the latest concrete chain block.
     if let Some(merging_block) = mergeset.merging_chain_block {
-        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader, reachability);
+        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader);
     }
 
     let mut events = CascadeEvents::new();
