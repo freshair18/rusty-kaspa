@@ -322,6 +322,10 @@ where
     }
 
     fn remove_position(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, position: LeafPosition) {
+        // TODO(relaxed): consider if it is worthwhile to shrink the back the tree following a removal
+        // this is standard practice, but in the Dagknight reorg context, removals will likely be
+        // followed by a corresponding number of aditions, hence it likely makes sense not to temporarily shrink
+        // capacity
         if node_range.len() == 1 {
             debug_assert_eq!(node_range.start, position);
             self.nodes[node] = BucketExtrema::empty();
