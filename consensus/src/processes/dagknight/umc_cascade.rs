@@ -136,7 +136,7 @@ impl CascadeMaintainer {
         self.cascade_score() >= SignedWork::zero()
     }
 
-    /// finds the first chain ancestor of the merging block, that is less than k^4 blue score away from it
+    /// finds the first chain ancestor of the merging block, that is more than k^4 blue score away from it
     fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(
         &mut self,
         merging_block: Hash,
@@ -147,8 +147,13 @@ impl CascadeMaintainer {
         let max_depth = u64::from(self.k).pow(4);
         let mut bound = self.depth_limit_ancestor;
 
-        while merging_blue_score.saturating_sub(coloring_reader.get_coloring_data(bound).blue_score) > max_depth {
-            bound = reachability.get_next_chain_ancestor(merging_block, bound);
+        while bound != merging_block {
+            let next_bound = reachability.get_next_chain_ancestor(merging_block, bound);
+            let next_distance = merging_blue_score.saturating_sub(coloring_reader.get_coloring_data(next_bound).blue_score);
+            if next_distance < max_depth {
+                break;
+            }
+            bound = next_bound;
         }
 
         self.depth_limit_ancestor = bound;
@@ -305,6 +310,11 @@ impl CascadeMaintainer {
         }
     }
 
+    /// The depth restriction bounds the number of negative flips processed here.
+    /// The blue future of the bound contains at most `k^4 + k^2` blocks (the
+    /// selected-chain interval up to the merger and its mergeset blues), while
+    /// the blue anticone of the bound contributes at most another `k^2` blocks.
+    /// Hence at most `(k^4 + k^2) + k^2` negative flips are processed.
     fn process_negative_crossings(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
         debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
 
