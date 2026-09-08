@@ -152,6 +152,16 @@ impl CascadeMaintainer {
         }
     }
 
+    fn violates_depth_restriction(&mut self, reachability: &impl ReachabilityService) -> bool {
+        for (chain, tree) in self.blues_chains_decomposition.iter().zip(self.chains_score_trees.iter_mut()) {
+            let prefix_length = strict_ancestor_index(chain, self.depth_limit_ancestor, reachability).unwrap_or(0);
+            if tree.has_negative_score_in_prefix(prefix_length) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Returns the total number of bucket flips observed during cascade stabilization.
     pub fn flip_count(&self) -> u64 {
         self.flip_count
@@ -294,17 +304,16 @@ impl CascadeMaintainer {
         debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
 
         loop {
+            if self.violates_depth_restriction(reachability) {
+                return;
+            }
+
             while let Some((chain_id, block)) = self
                 .chains_score_trees
                 .iter()
                 .enumerate()
                 .find_map(|(chain_id, tree)| tree.extract_positive_below_zero().map(|block| (chain_id, block)))
             {
-                // TODO: stop before processing this crossing when it is in the forbidden zone.
-                let crossing_is_allowed = true;
-                if !crossing_is_allowed {
-                    return;
-                }
                 self.chains_score_trees[chain_id].flip_to_negative(block);
                 self.negative_blue_work = self.negative_blue_work + block.work;
                 self.flip_count += 1;
@@ -439,7 +448,7 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
     }
 
     let cascade_score = maintainer.cascade_score();
-    let accepted = maintainer.virtual_accepts();
+    let accepted = !maintainer.violates_depth_restriction(reachability) && maintainer.virtual_accepts();
 
     CascadeResult {
         cascade_score,
