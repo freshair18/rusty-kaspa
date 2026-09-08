@@ -136,19 +136,19 @@ impl CascadeMaintainer {
         self.cascade_score() >= SignedWork::zero()
     }
 
-    fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(&mut self, merging_block: Hash, coloring_reader: &C) {
+    /// finds the first chain ancestor of the merging block, that is less than k^4 blue score away from it
+    fn update_depth_limit_ancestor<C: ColoringReader + ?Sized>(
+        &mut self,
+        merging_block: Hash,
+        coloring_reader: &C,
+        reachability: &impl ReachabilityService,
+    ) {
         let merging_blue_score = coloring_reader.get_coloring_data(merging_block).blue_score;
         let max_depth = u64::from(self.k).pow(4);
-        let previous_bound = self.depth_limit_ancestor;
-        let mut bound = merging_block;
+        let mut bound = self.depth_limit_ancestor;
 
-        while bound != previous_bound {
-            let parent = coloring_reader.get_coloring_data(bound).selected_parent;
-            let parent_blue_score = coloring_reader.get_coloring_data(parent).blue_score;
-            if merging_blue_score.saturating_sub(parent_blue_score) > max_depth {
-                break;
-            }
-            bound = parent;
+        while merging_blue_score.saturating_sub(coloring_reader.get_coloring_data(bound).blue_score) > max_depth {
+            bound = reachability.get_next_chain_ancestor(merging_block, bound);
         }
 
         self.depth_limit_ancestor = bound;
@@ -480,7 +480,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
     // immediately after its selected parent's mergeset, so the bound already
     // reflects the latest concrete chain block.
     if let Some(merging_block) = mergeset.merging_chain_block {
-        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader);
+        maintainer.update_depth_limit_ancestor(merging_block, coloring_reader, reachability);
     }
 
     let mut events = CascadeEvents::new();
