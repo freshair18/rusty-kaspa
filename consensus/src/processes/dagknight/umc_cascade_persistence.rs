@@ -234,6 +234,7 @@ mod tests {
             blues_chains_decomposition: vec![],
             chains_leaves: vec![],
             blk_mapping_to_chains: HashMap::new(),
+            depth_limit_ancestor: Hash::default(),
             deficit_work: Uint192::ZERO,
             blue_work: Uint192::ZERO,
             red_work: Uint192::ZERO,

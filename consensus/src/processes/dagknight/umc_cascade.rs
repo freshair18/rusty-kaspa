@@ -611,6 +611,7 @@ mod checkpoint_tests {
     use crate::model::services::reachability::MTReachabilityService;
     use crate::model::stores::reachability::{MemoryReachabilityStore, ReachabilityStore};
     use crate::processes::dagknight::umc_cascade_persistence::{MemoryUmcCascadeStore, UmcCascadeKey, UmcCascadeStoreReader};
+    use crate::processes::dagknight::umc_voting::test_fixtures::{MemoryColoringReader, make_gd};
     use crate::processes::reachability::interval::Interval;
     use kaspa_consensus_core::blockhash::ORIGIN;
 
@@ -630,6 +631,14 @@ mod checkpoint_tests {
         BlueWorkType::from_u64(100)
     }
 
+    fn coloring_reader(entries: &[(u64, u64, u64)]) -> MemoryColoringReader {
+        let mut reader = MemoryColoringReader::default();
+        for &(hash, selected_parent, blue_score) in entries {
+            reader.add(Hash::from_u64_word(hash), make_gd(Hash::from_u64_word(selected_parent), vec![], vec![], blue_score));
+        }
+        reader
+    }
+
     #[test]
     fn test_checkpoint_reload_produces_identical_result() {
         // Build a simple DAG: 1→2→3→4→5, conflict genesis at 3
@@ -644,6 +653,7 @@ mod checkpoint_tests {
         let cg = BlockWithWork::new(Hash::from_u64_word(3), work());
         let k: KType = 0;
         let nca = Hash::from_u64_word(2);
+        let coloring_reader = coloring_reader(&[(3, 2, 3), (4, 3, 4)]);
 
         // Stack: Virtual → Chain4 → CG
         let stack: Vec<Mergeset> = vec![
@@ -656,7 +666,7 @@ mod checkpoint_tests {
         ];
 
         // First run — from scratch
-        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0);
+        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0, &coloring_reader);
         assert!(!result1.from_checkpoint);
         assert_eq!(result1.estimated_effort_saved, 0);
 
@@ -678,6 +688,7 @@ mod checkpoint_tests {
             checkpoint_state,
             1, // estimated_effort_saved estimate
             5, // estimated_effort_total
+            &coloring_reader,
         );
 
         assert!(result2.from_checkpoint);
@@ -702,6 +713,7 @@ mod checkpoint_tests {
         let cg = BlockWithWork::new(Hash::from_u64_word(2), work());
         let k: KType = 0;
         let nca = Hash::from_u64_word(1);
+        let coloring_reader = coloring_reader(&[(2, 1, 2), (3, 2, 3)]);
 
         // Stack with gray block
         let stack: Vec<Mergeset> = vec![
@@ -713,7 +725,7 @@ mod checkpoint_tests {
             },
         ];
 
-        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0);
+        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0, &coloring_reader);
 
         // Reload from checkpoint
         let checkpoint_key = UmcCascadeKey::new(cg.hash, k, nca, Hash::from_u64_word(3));
@@ -730,6 +742,7 @@ mod checkpoint_tests {
             checkpoint_state,
             1,
             4, // estimated_effort_total
+            &coloring_reader,
         );
 
         assert_eq!(result1.accepted, result2.accepted);
@@ -748,6 +761,7 @@ mod checkpoint_tests {
         let store = Arc::new(MemoryUmcCascadeStore::new());
         let cg = BlockWithWork::new(Hash::from_u64_word(1), work());
         let k: KType = 0;
+        let coloring_reader = coloring_reader(&[(1, 0, 1), (2, 1, 2), (3, 1, 2)]);
 
         // First subgroup: NCA = 2
         let nca_1 = Hash::from_u64_word(2);
@@ -760,7 +774,7 @@ mod checkpoint_tests {
             },
         ];
 
-        let _result1 = run_cascade(stack_1, cg, k, nca_1, &reachability, store.clone(), None, 0, 0);
+        let _result1 = run_cascade(stack_1, cg, k, nca_1, &reachability, store.clone(), None, 0, 0, &coloring_reader);
 
         // Second subgroup: NCA = 3 (different key, should not reuse checkpoint)
         let nca_2 = Hash::from_u64_word(3);
@@ -773,7 +787,7 @@ mod checkpoint_tests {
             },
         ];
 
-        let _result2 = run_cascade(stack_2, cg, k, nca_2, &reachability, store.clone(), None, 0, 0);
+        let _result2 = run_cascade(stack_2, cg, k, nca_2, &reachability, store.clone(), None, 0, 0, &coloring_reader);
 
         // Verify both checkpoints exist with different keys
         let key_1 = UmcCascadeKey::new(cg.hash, k, nca_1, Hash::from_u64_word(2));
