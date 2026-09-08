@@ -73,4 +73,9 @@ where
 
     /// Returns all leaves in left-to-right (position) order.
     fn leaves(&self) -> Vec<T>;
+
+    /// Removes `leaf` when it is the most recently appended leaf.
+    ///
+    /// Returns `true` if the tree head was removed, and `false` otherwise.
+    fn remove_head(&mut self, leaf: T) -> bool;
 }

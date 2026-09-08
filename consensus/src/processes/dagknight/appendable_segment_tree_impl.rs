@@ -267,6 +267,21 @@ where
             .collect()
     }
 
+    /// Removes `leaf` if it is the most recently appended leaf.
+    pub fn remove_head(&mut self, leaf: T) -> bool {
+        let Some(&position) = self.position_by_leaf.get(&leaf) else {
+            return false;
+        };
+        if position + 1 != self.len {
+            return false;
+        }
+
+        self.remove_position(ROOT_NODE, self.full_leaf_range(), position);
+        self.position_by_leaf.remove(&leaf);
+        self.len -= 1;
+        true
+    }
+
     // ---------------------------------------------------------------------
     // Internal queries and bucket transitions
     // ---------------------------------------------------------------------
@@ -304,6 +319,23 @@ where
     fn set_bucket(&mut self, leaf: T, new_bucket: Bucket) {
         let target_position = self.position_of(leaf);
         self.set_bucket_at_position(ROOT_NODE, self.full_leaf_range(), target_position, new_bucket);
+    }
+
+    fn remove_position(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, position: LeafPosition) {
+        if node_range.len() == 1 {
+            debug_assert_eq!(node_range.start, position);
+            self.nodes[node] = BucketExtrema::empty();
+            return;
+        }
+
+        self.push_pending_delta(node);
+        let (left_child_range, right_child_range) = split_range(&node_range);
+        if left_child_range.contains(&position) {
+            self.remove_position(left_child(node), left_child_range, position);
+        } else {
+            self.remove_position(right_child(node), right_child_range, position);
+        }
+        self.recompute_node(node);
     }
 
     fn set_bucket_at_position(
@@ -534,6 +566,10 @@ where
 
     fn leaves(&self) -> Vec<T> {
         AppendableSegmentTree::leaves(self)
+    }
+
+    fn remove_head(&mut self, leaf: T) -> bool {
+        AppendableSegmentTree::remove_head(self, leaf)
     }
 }
 
