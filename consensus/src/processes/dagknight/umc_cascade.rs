@@ -676,25 +676,33 @@ mod checkpoint_tests {
         let cg = BlockWithWork::new(Hash::from_u64_word(3), work());
         let k: KType = 0;
         let nca = Hash::from_u64_word(2);
-        let coloring_reader = coloring_reader(&[(3, 2, 3), (4, 3, 4)]);
+        let mut coloring_reader = coloring_reader(&[(3, 2, 3), (4, 3, 4)]);
+        coloring_reader.add(
+            Hash::from_u64_word(4),
+            make_gd(Hash::from_u64_word(3), vec![Hash::from_u64_word(4)], vec![], 4),
+        );
 
         // Stack: Virtual → Chain4 → CG
         let stack: Vec<Mergeset> = vec![
-            Mergeset { merging_chain_block: None, mergeset_blues: vec![(Hash::from_u64_word(5), work())], mergeset_reds: vec![] },
             Mergeset {
-                merging_chain_block: Some(Hash::from_u64_word(4)),
+                selected_parent: Hash::from_u64_word(4),
+                mergeset_blues: vec![(Hash::from_u64_word(5), work())],
+                mergeset_reds: vec![],
+            },
+            Mergeset {
+                selected_parent: Hash::from_u64_word(3),
                 mergeset_blues: vec![(Hash::from_u64_word(4), work())],
                 mergeset_reds: vec![],
             },
         ];
 
         // First run — from scratch
-        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0, &coloring_reader);
+        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 5, &coloring_reader);
         assert!(!result1.from_checkpoint);
         assert_eq!(result1.estimated_effort_saved, 0);
 
         // Second run — same zone, but the caller loads the checkpoint saved by the first run
-        let checkpoint_key = UmcCascadeKey::new(cg.hash, k, nca, Hash::from_u64_word(4));
+        let checkpoint_key = UmcCascadeKey::new(cg.hash, k, nca, stack[1].checkpoint_hash());
         let checkpoint_state = store.get_checkpoint(checkpoint_key).unwrap();
         assert!(checkpoint_state.is_some(), "checkpoint should have been saved");
 
@@ -736,22 +744,30 @@ mod checkpoint_tests {
         let cg = BlockWithWork::new(Hash::from_u64_word(2), work());
         let k: KType = 0;
         let nca = Hash::from_u64_word(1);
-        let coloring_reader = coloring_reader(&[(2, 1, 2), (3, 2, 3)]);
+        let mut coloring_reader = coloring_reader(&[(2, 1, 2), (3, 2, 3)]);
+        coloring_reader.add(
+            Hash::from_u64_word(3),
+            make_gd(Hash::from_u64_word(2), vec![Hash::from_u64_word(3)], vec![Hash::from_u64_word(1)], 3),
+        );
 
         // Stack with gray block
         let stack: Vec<Mergeset> = vec![
-            Mergeset { merging_chain_block: None, mergeset_blues: vec![(Hash::from_u64_word(4), work())], mergeset_reds: vec![] },
             Mergeset {
-                merging_chain_block: Some(Hash::from_u64_word(3)),
+                selected_parent: Hash::from_u64_word(3),
+                mergeset_blues: vec![(Hash::from_u64_word(4), work())],
+                mergeset_reds: vec![],
+            },
+            Mergeset {
+                selected_parent: Hash::from_u64_word(2),
                 mergeset_blues: vec![(Hash::from_u64_word(3), work())],
                 mergeset_reds: vec![(Hash::from_u64_word(1), work())], // Gray: it is the next chain ancestor
             },
         ];
 
-        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 0, &coloring_reader);
+        let result1 = run_cascade(stack.clone(), cg, k, nca, &reachability, store.clone(), None, 0, 4, &coloring_reader);
 
         // Reload from checkpoint
-        let checkpoint_key = UmcCascadeKey::new(cg.hash, k, nca, Hash::from_u64_word(3));
+        let checkpoint_key = UmcCascadeKey::new(cg.hash, k, nca, stack[1].checkpoint_hash());
         let checkpoint_state = store.get_checkpoint(checkpoint_key).unwrap();
         assert!(checkpoint_state.is_some());
 
@@ -784,37 +800,45 @@ mod checkpoint_tests {
         let store = Arc::new(MemoryUmcCascadeStore::new());
         let cg = BlockWithWork::new(Hash::from_u64_word(1), work());
         let k: KType = 0;
-        let coloring_reader = coloring_reader(&[(1, 0, 1), (2, 1, 2), (3, 1, 2)]);
+        let mut coloring_reader = coloring_reader(&[(1, 0, 1), (2, 1, 2), (3, 1, 2)]);
+        coloring_reader.add(
+            Hash::from_u64_word(2),
+            make_gd(Hash::from_u64_word(1), vec![Hash::from_u64_word(2)], vec![Hash::from_u64_word(3)], 2),
+        );
+        coloring_reader.add(
+            Hash::from_u64_word(3),
+            make_gd(Hash::from_u64_word(1), vec![Hash::from_u64_word(3)], vec![Hash::from_u64_word(2)], 2),
+        );
 
         // First subgroup: NCA = 2
         let nca_1 = Hash::from_u64_word(2);
         let stack_1: Vec<Mergeset> = vec![
-            Mergeset { merging_chain_block: None, mergeset_blues: vec![], mergeset_reds: vec![] },
+            Mergeset { selected_parent: Hash::from_u64_word(2), mergeset_blues: vec![], mergeset_reds: vec![] },
             Mergeset {
-                merging_chain_block: Some(Hash::from_u64_word(2)),
+                selected_parent: Hash::from_u64_word(1),
                 mergeset_blues: vec![(Hash::from_u64_word(2), work())],
                 mergeset_reds: vec![(Hash::from_u64_word(3), work())],
             },
         ];
 
-        let _result1 = run_cascade(stack_1, cg, k, nca_1, &reachability, store.clone(), None, 0, 0, &coloring_reader);
+        let _result1 = run_cascade(stack_1.clone(), cg, k, nca_1, &reachability, store.clone(), None, 0, 2, &coloring_reader);
 
         // Second subgroup: NCA = 3 (different key, should not reuse checkpoint)
         let nca_2 = Hash::from_u64_word(3);
         let stack_2: Vec<Mergeset> = vec![
-            Mergeset { merging_chain_block: None, mergeset_blues: vec![], mergeset_reds: vec![] },
+            Mergeset { selected_parent: Hash::from_u64_word(3), mergeset_blues: vec![], mergeset_reds: vec![] },
             Mergeset {
-                merging_chain_block: Some(Hash::from_u64_word(3)),
+                selected_parent: Hash::from_u64_word(1),
                 mergeset_blues: vec![(Hash::from_u64_word(3), work())],
                 mergeset_reds: vec![(Hash::from_u64_word(2), work())],
             },
         ];
 
-        let _result2 = run_cascade(stack_2, cg, k, nca_2, &reachability, store.clone(), None, 0, 0, &coloring_reader);
+        let _result2 = run_cascade(stack_2.clone(), cg, k, nca_2, &reachability, store.clone(), None, 0, 2, &coloring_reader);
 
         // Verify both checkpoints exist with different keys
-        let key_1 = UmcCascadeKey::new(cg.hash, k, nca_1, Hash::from_u64_word(2));
-        let key_2 = UmcCascadeKey::new(cg.hash, k, nca_2, Hash::from_u64_word(3));
+        let key_1 = UmcCascadeKey::new(cg.hash, k, nca_1, stack_1[1].checkpoint_hash());
+        let key_2 = UmcCascadeKey::new(cg.hash, k, nca_2, stack_2[1].checkpoint_hash());
 
         assert!(store.get_checkpoint(key_1).unwrap().is_some(), "checkpoint for NCA1 should exist");
         assert!(store.get_checkpoint(key_2).unwrap().is_some(), "checkpoint for NCA2 should exist");
