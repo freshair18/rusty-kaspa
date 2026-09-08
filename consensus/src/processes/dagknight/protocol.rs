@@ -365,10 +365,10 @@ impl<
 
         #[cfg(feature = "baseline-debugging")]
         {
-        // Compare baseline (per-blue recursive) against cascade (global virtual score)
-        // These use different acceptance criteria and are not expected to always agree.
-        // The baseline is Algorithm 6 from the paper; the cascade is the optimized approximated implementation.
- 
+            // Compare baseline (per-blue recursive) against cascade (global virtual score)
+            // These use different acceptance criteria and are not expected to always agree.
+            // The baseline is Algorithm 6 from the paper; the cascade is the optimized approximated implementation.
+
             let baseline_result =
                 self.baseline_umc_cascade_voting(conflict_genesis, subgroup, virtual_gd.clone(), k_to_check, &conflict_zone_manager);
             self.counters.record_baseline_disagreement(baseline_result.accepted, cascade_result.accepted);

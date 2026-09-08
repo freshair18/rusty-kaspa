@@ -89,14 +89,14 @@ impl Mergeset {
         reds: impl ExactSizeIterator<Item = Hash>,
     ) -> Hash {
         let mut hasher = UmcCascadeMergesetHasher::new();
-        hasher.write(selected_parent.as_ref());
+        hasher.write(&selected_parent.as_bytes()[..]);
         hasher.write((blues.len() as u64).to_be_bytes());
         for hash in blues {
-            hasher.write(hash.as_ref());
+            hasher.write(&hash.as_bytes()[..]);
         }
         hasher.write((reds.len() as u64).to_be_bytes());
         for hash in reds {
-            hasher.write(hash.as_ref());
+            hasher.write(&hash.as_bytes()[..]);
         }
         hasher.finalize()
     }

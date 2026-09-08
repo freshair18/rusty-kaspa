@@ -92,7 +92,7 @@ impl CascadeMaintainer {
             red_work: BlueWorkType::ZERO,
             negative_blue_work: BlueWorkType::ZERO,
             flip_count: 0,
-            bound_depth: u64::from(k).pow(4)+1,
+            bound_depth: u64::from(k).pow(4) + 1,
             depth_limit_ancestor: conflict_genesis.hash,
             next_chain_ancestor,
         }
@@ -449,9 +449,8 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
 
     // Process remaining mergesets (pop from bottom = CG-first, upward)
     while let Some(mergeset) = mergeset_stack.pop() {
-        let checkpoint_key = (!mergeset_stack.is_empty()).then(|| {
-            UmcCascadeKey::new(conflict_genesis.hash, k, next_chain_ancestor, mergeset.checkpoint_hash())
-        });
+        let checkpoint_key = (!mergeset_stack.is_empty())
+            .then(|| UmcCascadeKey::new(conflict_genesis.hash, k, next_chain_ancestor, mergeset.checkpoint_hash()));
         voting_blocks += process_mergeset(&mut maintainer, mergeset, reachability, coloring_reader);
 
         // Checkpoint at chain block — persist to store (best-effort)
@@ -677,10 +676,7 @@ mod checkpoint_tests {
         let k: KType = 0;
         let nca = Hash::from_u64_word(2);
         let mut coloring_reader = coloring_reader(&[(3, 2, 3), (4, 3, 4)]);
-        coloring_reader.add(
-            Hash::from_u64_word(4),
-            make_gd(Hash::from_u64_word(3), vec![Hash::from_u64_word(4)], vec![], 4),
-        );
+        coloring_reader.add(Hash::from_u64_word(4), make_gd(Hash::from_u64_word(3), vec![Hash::from_u64_word(4)], vec![], 4));
 
         // Stack: Virtual → Chain4 → CG
         let stack: Vec<Mergeset> = vec![
