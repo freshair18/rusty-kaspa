@@ -12,7 +12,7 @@ use crate::model::services::reachability::{MTReachabilityService, ReachabilitySe
 use crate::model::stores::headers::HeaderStoreReader;
 use crate::model::stores::reachability::ReachabilityStoreReader;
 use crate::processes::dagknight::umc_cascade_persistence::{
-    ChainLeafEntry, Mergeset, UmcCascadeKey, UmcCascadePersistedState, UmcCascadeStore,
+    CascadeEvent, ChainLeafEntry, Mergeset, MergesetEvents, UmcCascadeKey, UmcCascadePersistedState, UmcCascadeStore,
 };
 use crate::processes::dagknight::umc_voting::{CascadeResult, ColoringReader, SignedWork, UmcVoter, UmcVotingContext};
 use crate::processes::dagknight::{AppendableSegmentTree, Bucket, bucket_for_score};
@@ -63,11 +63,12 @@ fn work_delta(work: BlueWorkType, bucket: Bucket) -> SignedWork {
 struct CascadeEvents {
     positive: VecDeque<(Hash, SignedWork)>,
     negative: VecDeque<(Hash, SignedWork)>,
+    processed: Vec<CascadeEvent>,
 }
 
 impl CascadeEvents {
     fn new() -> Self {
-        Self { positive: VecDeque::new(), negative: VecDeque::new() }
+        Self { positive: VecDeque::new(), negative: VecDeque::new(), processed: Vec::new() }
     }
 
     fn push(&mut self, source: Hash, delta: SignedWork) {
@@ -76,6 +77,30 @@ impl CascadeEvents {
         } else {
             self.negative.push_back((source, delta));
         }
+    }
+
+    fn pop_positive(&mut self) -> Option<(Hash, SignedWork)> {
+        let event = self.positive.pop_front();
+        if let Some((source, delta)) = event {
+            self.record(source, delta);
+            Some((source, delta))
+        } else {
+            None
+        }
+    }
+
+    fn pop_negative(&mut self) -> Option<(Hash, SignedWork)> {
+        let event = self.negative.pop_front();
+        if let Some((source, delta)) = event {
+            self.record(source, delta);
+            Some((source, delta))
+        } else {
+            None
+        }
+    }
+
+    fn record(&mut self, source: Hash, delta: SignedWork) {
+        self.processed.push(CascadeEvent { source, delta_abs: delta.abs(), delta_negative: delta.negative() });
     }
 }
 
