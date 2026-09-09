@@ -84,6 +84,7 @@ impl<O: HeaderStoreReader + 'static, R: ReachabilityStoreReader + Clone> UmcVote
             accepted: total_vote >= SignedWork::zero(),
             flips: 0,
             voting_blocks,
+            events_diff: Vec::new(),
             from_checkpoint: false,
             estimated_effort_saved: 0,
             estimated_effort_total: 0,

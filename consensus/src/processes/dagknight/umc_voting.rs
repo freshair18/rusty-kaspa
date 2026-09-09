@@ -4,6 +4,7 @@ use kaspa_consensus_core::{BlueWorkType, KType};
 use kaspa_hashes::Hash;
 use kaspa_math::int::SignedInteger;
 
+use super::umc_cascade_persistence::MergesetEvents;
 use crate::model::stores::ghostdag::GhostdagData;
 
 /// Signed blue work — `SignedInteger<BlueWorkType>` with sign, used for cascade score
@@ -49,6 +50,8 @@ pub struct CascadeResult {
     pub accepted: bool,
     pub flips: u64,
     pub voting_blocks: u64,
+    /// Cascade events grouped by the mergeset that produced them.
+    pub events_diff: Vec<MergesetEvents>,
     /// Whether this cascade started from a persisted checkpoint state.
     pub from_checkpoint: bool,
     /// Estimated blue blocks skipped by loading from checkpoint.
