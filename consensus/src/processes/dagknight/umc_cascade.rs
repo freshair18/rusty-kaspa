@@ -543,6 +543,7 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
     }
 
     let cascade_score = maintainer.cascade_score();
+    // TODO: Create a rigorous document explaining why this restriction maintains dagknight's security.
     let accepted = !maintainer.violates_depth_restriction(reachability) && maintainer.virtual_accepts();
 
     CascadeResult {

@@ -36,6 +36,7 @@ pub fn bucket_for_score<S: PartialOrd + Zero>(score: S) -> Bucket {
 /// - `flip_to_negative`: O(log n)
 /// - `flip_to_positive`: O(log n)
 /// - `score`: O(log n)
+/// - `remove_head`: O(log n)
 pub trait AppendableSegmentTreeApi<T, S = i64>
 where
     S: Copy + PartialOrd + AddAssign + Zero,
