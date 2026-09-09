@@ -148,6 +148,58 @@ impl CascadeMaintainer {
         self.red_work = self.red_work + block.work;
         events.push(block.hash, work_delta(block.work, Bucket::Negative));
     }
+    /// Undo a path of previously processed mergesets as one operation.
+    ///
+    /// All inverse events are queued and applied before any blue leaves are
+    /// removed. Blue leaves from the complete path are then removed jointly in
+    /// reverse topological order, without running cascade crossing logic.
+    pub fn unprocess_mergesets(
+        &mut self,
+        mergesets: &[Mergeset],
+        events_diff: &[MergesetEvents],
+        reachability: &impl ReachabilityService,
+    ) {
+        assert_eq!(mergesets.len(), events_diff.len(), "each mergeset must have an events diff");
+        let event_count: usize = events_diff.iter().map(|diff| diff.events.len()).sum();
+        let mut inverse_events = VecDeque::with_capacity(event_count);
+        let mut blue_blocks = Vec::new();
+
+        for (mergeset, events) in mergesets.iter().zip(events_diff) {
+            for event in &events.events {
+                let magnitude = SignedWork::from(event.delta_abs);
+                let delta = if event.delta_negative { magnitude } else { SignedWork::zero() - magnitude };
+                inverse_events.push_back((event.source, delta));
+            }
+
+            for &(hash, work) in &mergeset.mergeset_reds {
+                // ignore gray work
+                if !reachability.is_chain_ancestor_of(self.next_chain_ancestor, hash) {
+                    self.red_work = self.red_work - work;
+                }
+            }
+
+            blue_blocks.extend(mergeset.mergeset_blues.iter().map(|&(hash, work)| BlockWithWork::new(hash, work)));
+        }
+
+        while let Some((source, delta)) = inverse_events.pop_front() {
+            self.apply_event(source, delta, reachability);
+        }
+
+        for block in blue_blocks.into_iter().rev() {
+            let chain_id = *self.blk_mapping_to_chains.get(&block.hash).expect("blue block is not present");
+            let chain = &mut self.blues_chains_decomposition[chain_id];
+            assert_eq!(chain.last().copied(), Some(block.hash), "blue removal must follow reverse topological order");
+            let tree = &mut self.chains_score_trees[chain_id];
+            let bucket = tree.bucket(block);
+            assert!(tree.remove_head(block), "blue block must be the current chain head");
+            chain.pop();
+            self.blk_mapping_to_chains.remove(&block.hash);
+            self.blue_work = self.blue_work - block.work;
+            if bucket == Bucket::Negative {
+                self.negative_blue_work = self.negative_blue_work - block.work;
+            }
+        }
+    }
 
     /// Returns the aggregate score of the virtual block.
     pub fn cascade_score(&self) -> SignedWork {
@@ -540,7 +592,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
 
     maintainer.apply_direct_red_effects(reachability, &mut events);
     maintainer.process_negative_crossings(reachability, &mut events);
-    voting_blocks
+    (voting_blocks, events.processed)
 }
 
 // Segment Tree UMC Voter
