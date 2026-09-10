@@ -68,6 +68,8 @@ where
 
     fn extract_positive_below_zero(&self) -> Option<T>;
     fn extract_negative_at_least_zero(&self) -> Option<T>;
+    fn extract_positive_below_zero_batch(&mut self) -> Vec<T>;
+    fn extract_negative_at_least_zero_batch(&mut self) -> Vec<T>;
 
     fn flip_to_negative(&mut self, leaf: T);
     fn flip_to_positive(&mut self, leaf: T);

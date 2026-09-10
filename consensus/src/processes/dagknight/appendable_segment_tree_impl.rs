@@ -232,6 +232,18 @@ where
         self.root().max_negative.filter(|candidate| candidate.score >= S::zero()).map(|candidate| candidate.leaf)
     }
 
+    pub fn extract_positive_below_zero_batch(&mut self) -> Vec<T> {
+        let mut leaves = Vec::new();
+        self.collect_positive_below_zero(ROOT_NODE, self.full_leaf_range(), &mut leaves);
+        leaves
+    }
+
+    pub fn extract_negative_at_least_zero_batch(&mut self) -> Vec<T> {
+        let mut leaves = Vec::new();
+        self.collect_negative_at_least_zero(ROOT_NODE, self.full_leaf_range(), &mut leaves);
+        leaves
+    }
+
     pub fn flip_to_negative(&mut self, leaf: T) {
         self.set_bucket(leaf, Bucket::Negative);
     }
@@ -313,6 +325,42 @@ where
     fn set_bucket(&mut self, leaf: T, new_bucket: Bucket) {
         let target_position = self.position_of(leaf);
         self.set_bucket_at_position(ROOT_NODE, self.full_leaf_range(), target_position, new_bucket);
+    }
+
+    fn collect_positive_below_zero(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, leaves: &mut Vec<T>) {
+        let Some(candidate) = self.nodes[node].min_positive else {
+            return;
+        };
+        if candidate.score >= S::zero() {
+            return;
+        }
+        if node_range.len() == 1 {
+            leaves.push(candidate.leaf);
+            return;
+        }
+
+        self.push_pending_delta(node);
+        let (left_child_range, right_child_range) = split_range(&node_range);
+        self.collect_positive_below_zero(left_child(node), left_child_range, leaves);
+        self.collect_positive_below_zero(right_child(node), right_child_range, leaves);
+    }
+
+    fn collect_negative_at_least_zero(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, leaves: &mut Vec<T>) {
+        let Some(candidate) = self.nodes[node].max_negative else {
+            return;
+        };
+        if candidate.score < S::zero() {
+            return;
+        }
+        if node_range.len() == 1 {
+            leaves.push(candidate.leaf);
+            return;
+        }
+
+        self.push_pending_delta(node);
+        let (left_child_range, right_child_range) = split_range(&node_range);
+        self.collect_negative_at_least_zero(left_child(node), left_child_range, leaves);
+        self.collect_negative_at_least_zero(right_child(node), right_child_range, leaves);
     }
 
     fn remove_position(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, position: LeafPosition) {
@@ -593,6 +641,14 @@ where
 
     fn extract_negative_at_least_zero(&self) -> Option<T> {
         AppendableSegmentTree::extract_negative_at_least_zero(self)
+    }
+
+    fn extract_positive_below_zero_batch(&mut self) -> Vec<T> {
+        AppendableSegmentTree::extract_positive_below_zero_batch(self)
+    }
+
+    fn extract_negative_at_least_zero_batch(&mut self) -> Vec<T> {
+        AppendableSegmentTree::extract_negative_at_least_zero_batch(self)
     }
 
     fn flip_to_negative(&mut self, leaf: T) {
