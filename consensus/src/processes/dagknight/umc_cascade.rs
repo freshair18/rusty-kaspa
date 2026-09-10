@@ -395,18 +395,21 @@ impl CascadeMaintainer {
     /// intentionally does not use the range-update batching optimization, 
     /// which provides de facto speedup, but is hard to analyze.
     fn process_positive_events(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        while let Some((source, delta)) = events.pop_positive() {
-            self.apply_event(source, delta, reachability);
-            while let Some((chain_id, block)) = self
-                .chains_score_trees
-                .iter()
-                .enumerate()
-                .find_map(|(chain_id, tree)| tree.extract_negative_at_least_zero().map(|block| (chain_id, block)))
-            {
-                self.chains_score_trees[chain_id].flip_to_positive(block);
-                self.negative_blue_work = self.negative_blue_work - block.work;
-                self.flip_count += 1;
-                events.push(block.hash, work_delta(block.work * 2u64, Bucket::Positive));
+        while !events.positive.is_empty() {
+            let mut positive_events = Vec::new();
+            while let Some(event) = events.pop_positive() {
+                positive_events.push(event);
+            }
+            self.apply_events_batch(positive_events, reachability);
+
+            for chain_id in 0..self.chains_score_trees.len() {
+                let crossing_blocks = self.chains_score_trees[chain_id].extract_negative_at_least_zero_batch();
+                for block in crossing_blocks {
+                    self.chains_score_trees[chain_id].flip_to_positive(block);
+                    self.negative_blue_work = self.negative_blue_work - block.work;
+                    self.flip_count += 1;
+                    events.push(block.hash, work_delta(block.work * 2u64, Bucket::Positive));
+                }
             }
         }
     }
@@ -437,16 +440,14 @@ impl CascadeMaintainer {
                 return;
             }
 
-            while let Some((chain_id, block)) = self
-                .chains_score_trees
-                .iter()
-                .enumerate()
-                .find_map(|(chain_id, tree)| tree.extract_positive_below_zero().map(|block| (chain_id, block)))
-            {
-                self.chains_score_trees[chain_id].flip_to_negative(block);
-                self.negative_blue_work = self.negative_blue_work + block.work;
-                self.flip_count += 1;
-                events.push(block.hash, work_delta(block.work * 2u64, Bucket::Negative));
+            for chain_id in 0..self.chains_score_trees.len() {
+                let crossing_blocks = self.chains_score_trees[chain_id].extract_positive_below_zero_batch();
+                for block in crossing_blocks {
+                    self.chains_score_trees[chain_id].flip_to_negative(block);
+                    self.negative_blue_work = self.negative_blue_work + block.work;
+                    self.flip_count += 1;
+                    events.push(block.hash, work_delta(block.work * 2u64, Bucket::Negative));
+                }
             }
 
             if events.negative.is_empty() {
@@ -460,14 +461,6 @@ impl CascadeMaintainer {
                 crossing_events.push(event);
             }
             self.apply_events_batch(crossing_events, reachability);
-        }
-    }
-
-    fn apply_event(&mut self, source: Hash, delta: SignedWork, reachability: &impl ReachabilityService) {
-        for (chain, tree) in self.blues_chains_decomposition.iter().zip(self.chains_score_trees.iter_mut()) {
-            if let Some(ancestor_index) = strict_ancestor_index(chain, source, reachability) {
-                tree.prefix_add(ancestor_index, delta);
-            }
         }
     }
 
