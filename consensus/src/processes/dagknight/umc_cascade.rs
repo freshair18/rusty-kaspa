@@ -373,7 +373,7 @@ impl CascadeMaintainer {
     /// amortized. Multiplying by the cost of propagating an event gives
     /// `O(k^6 log(n / k^2))` amortized time per mergeset round. Direct events
     /// from the `O(k^2)` newly processed blocks are lower order. This accounting
-    /// intentionally does not use the range-update batching optimization, 
+    /// intentionally does not use the range-update batching optimization,
     /// which provides de facto speedup, but is hard to analyze.
     fn process_positive_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
         while !events.queue.is_empty() {
@@ -399,7 +399,10 @@ impl CascadeMaintainer {
     /// the blue anticone of the bound contributes at most another `k^2` blocks.
     /// Hence at most `(k^4 + k^2) + k^2` negative flips are processed.
     fn process_negative_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        debug_assert!(events.queue.iter().all(|(_, delta)| *delta < SignedWork::zero()), "red processing must start with negative events");
+        debug_assert!(
+            events.queue.iter().all(|(_, delta)| *delta < SignedWork::zero()),
+            "red processing must start with negative events"
+        );
 
         loop {
             self.apply_events_batch(events.drain(), reachability);
@@ -574,7 +577,7 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
 ///
 /// All blue and red effects are queued before stabilization starts. Applying the
 /// positive phase  first and consuming any potential positive flip,  allows us to be
-/// certain that if a negative is found beyond the depth restriction later on, 
+/// certain that if a negative is found beyond the depth restriction later on,
 /// than it is final for this mergeset and the run can be safely stopped.
 fn process_mergeset<C: ColoringReader + ?Sized>(
     maintainer: &mut CascadeMaintainer,

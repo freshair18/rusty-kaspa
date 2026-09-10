@@ -183,7 +183,7 @@ where
     /// Add `delta` to the half-open range of logical leaf positions.
     pub fn range_add(&mut self, update_range: Range<LeafPosition>, delta: S) {
         // TODO(relaxed): avoid code duplication by calling range_add_batch to implement this.
-        // Current version uses direct implementation for easier reviewability 
+        // Current version uses direct implementation for easier reviewability
         assert!(update_range.start <= update_range.end, "range start exceeds range end");
         assert!(update_range.end <= self.len, "range exceeds tree length");
         if update_range.is_empty() || delta.is_zero() {
