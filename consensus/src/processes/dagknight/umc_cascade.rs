@@ -61,42 +61,25 @@ fn work_delta(work: BlueWorkType, bucket: Bucket) -> SignedWork {
 }
 
 struct CascadeEvents {
-    positive: VecDeque<(Hash, SignedWork)>,
-    negative: VecDeque<(Hash, SignedWork)>,
+    queue: VecDeque<(Hash, SignedWork)>,
     processed: Vec<CascadeEvent>,
 }
 
 impl CascadeEvents {
     fn new() -> Self {
-        Self { positive: VecDeque::new(), negative: VecDeque::new(), processed: Vec::new() }
+        Self { queue: VecDeque::new(), processed: Vec::new() }
     }
 
     fn push(&mut self, source: Hash, delta: SignedWork) {
-        if delta >= SignedWork::zero() {
-            self.positive.push_back((source, delta));
-        } else {
-            self.negative.push_back((source, delta));
-        }
+        self.queue.push_back((source, delta));
     }
 
-    fn pop_positive(&mut self) -> Option<(Hash, SignedWork)> {
-        let event = self.positive.pop_front();
-        if let Some((source, delta)) = event {
+    fn drain(&mut self) -> Vec<(Hash, SignedWork)> {
+        let events: Vec<_> = self.queue.drain(..).collect();
+        for &(source, delta) in &events {
             self.record(source, delta);
-            Some((source, delta))
-        } else {
-            None
         }
-    }
-
-    fn pop_negative(&mut self) -> Option<(Hash, SignedWork)> {
-        let event = self.negative.pop_front();
-        if let Some((source, delta)) = event {
-            self.record(source, delta);
-            Some((source, delta))
-        } else {
-            None
-        }
+        events
     }
 
     fn record(&mut self, source: Hash, delta: SignedWork) {
@@ -357,8 +340,6 @@ impl CascadeMaintainer {
 
     // ----- Event processing -----
 
-    /// Stabilizes all positive events produced by the current mergeset.
-    ///
     /// # Amortized complexity
     ///
     /// Let the `c = O(k^2)` chains contain `n_1, ..., n_c` blocks, with
@@ -380,7 +361,7 @@ impl CascadeMaintainer {
     ///    inside the boundary by `O(k^4)` for that round.
     /// 2. A positive flip strictly beyond the boundary can occur at most once.
     ///    If that block later obtains a negative score, `violates_depth_restriction`
-    ///    stops processing before `process_negative_crossings` changes its bucket
+    ///    stops processing before `process_negative_phase` changes its bucket
     ///    back to negative. Its score may subsequently change, but it cannot
     ///    cause positive flip processing.
     ///
@@ -394,13 +375,9 @@ impl CascadeMaintainer {
     /// from the `O(k^2)` newly processed blocks are lower order. This accounting
     /// intentionally does not use the range-update batching optimization, 
     /// which provides de facto speedup, but is hard to analyze.
-    fn process_positive_events(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        while !events.positive.is_empty() {
-            let mut positive_events = Vec::new();
-            while let Some(event) = events.pop_positive() {
-                positive_events.push(event);
-            }
-            self.apply_events_batch(positive_events, reachability);
+    fn process_positive_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+        while !events.queue.is_empty() {
+            self.apply_events_batch(events.drain(), reachability);
 
             for chain_id in 0..self.chains_score_trees.len() {
                 let crossing_blocks = self.chains_score_trees[chain_id].extract_negative_at_least_zero_batch();
@@ -414,28 +391,19 @@ impl CascadeMaintainer {
         }
     }
 
-    fn apply_direct_red_effects(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
-
-        // These are the direct effects of all reds in the current mergeset. They
-        // are inherent to the mergeset, so apply every one before examining any
-        // consequent negative crossing.
-        let mut direct_events = Vec::new();
-        while let Some(event) = events.pop_negative() {
-            direct_events.push(event);
-        }
-        self.apply_events_batch(direct_events, reachability);
-    }
-
+    /// Processes queued effects and settles negative bucket crossings.
+    ///
     /// The depth restriction bounds the number of negative flips processed here.
     /// The blue future of the bound contains at most `k^4 + k^2` blocks (the
     /// selected-chain interval up to the merger and its mergeset blues), while
     /// the blue anticone of the bound contributes at most another `k^2` blocks.
     /// Hence at most `(k^4 + k^2) + k^2` negative flips are processed.
-    fn process_negative_crossings(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        debug_assert!(events.positive.is_empty(), "positive events must be fully consumed before red processing");
+    fn process_negative_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+        debug_assert!(events.queue.iter().all(|(_, delta)| *delta < SignedWork::zero()), "red processing must start with negative events");
 
         loop {
+            self.apply_events_batch(events.drain(), reachability);
+
             if self.violates_depth_restriction(reachability) {
                 return;
             }
@@ -450,17 +418,12 @@ impl CascadeMaintainer {
                 }
             }
 
-            if events.negative.is_empty() {
+            if events.queue.is_empty() {
                 break;
             }
 
             // Every queued event belongs to a flip already committed in this
             // round, so propagate the complete batch before checking again.
-            let mut crossing_events = Vec::new();
-            while let Some(event) = events.pop_negative() {
-                crossing_events.push(event);
-            }
-            self.apply_events_batch(crossing_events, reachability);
         }
     }
 
@@ -609,8 +572,10 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
 
 /// Process one mergeset in protocol order.
 ///
-/// Blue effects are fully stabilized first. All direct red effects are then
-/// applied, followed by the negative event cascade, until stoppage
+/// All blue and red effects are queued before stabilization starts. Applying the
+/// positive phase  first and consuming any potential positive flip,  allows us to be
+/// certain that if a negative is found beyond the depth restriction later on, 
+/// than it is final for this mergeset and the run can be safely stopped.
 fn process_mergeset<C: ColoringReader + ?Sized>(
     maintainer: &mut CascadeMaintainer,
     mergeset: Mergeset,
@@ -631,8 +596,6 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
         maintainer.add_blue(BlockWithWork::new(hash, work), reachability, &mut events);
         voting_blocks += 1;
     }
-    maintainer.process_positive_events(reachability, &mut events);
-
     for (hash, work) in mergeset.mergeset_reds {
         if !reachability.is_chain_ancestor_of(maintainer.next_chain_ancestor, hash) {
             maintainer.add_red(BlockWithWork::new(hash, work), &mut events);
@@ -640,8 +603,8 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
         }
     }
 
-    maintainer.apply_direct_red_effects(reachability, &mut events);
-    maintainer.process_negative_crossings(reachability, &mut events);
+    maintainer.process_positive_phase(reachability, &mut events);
+    maintainer.process_negative_phase(reachability, &mut events);
     (voting_blocks, events.processed)
 }
 
