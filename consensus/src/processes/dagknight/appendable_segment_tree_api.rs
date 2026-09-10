@@ -1,4 +1,4 @@
-use std::ops::{AddAssign, Range};
+use std::ops::{AddAssign, Range, Sub};
 
 use num_traits::Zero;
 
@@ -28,6 +28,7 @@ pub fn bucket_for_score<S: PartialOrd + Zero>(score: S) -> Bucket {
 /// - `append_leaf`: amortized O(log n) due to occasional growth and ancestor rebuild
 /// - `prefix_add`: O(log n)
 /// - `range_add`: O(log n)
+/// - `range_add_batch`: O(d log(n/d)) for `d` disjoint ranges
 /// - `has_positive_below_zero`: O(1)
 /// - `has_negative_at_least_zero`: O(1)
 /// - `has_negative_score_in_prefix`: O(log n)
@@ -39,7 +40,7 @@ pub fn bucket_for_score<S: PartialOrd + Zero>(score: S) -> Bucket {
 /// - `remove_head`: O(log n)
 pub trait AppendableSegmentTreeApi<T, S = i64>
 where
-    S: Copy + PartialOrd + AddAssign + Zero,
+    S: Copy + PartialOrd + AddAssign + Sub<Output = S> + Zero,
 {
     fn new() -> Self
     where
@@ -56,6 +57,7 @@ where
     fn append_leaf(&mut self, leaf: T, initial_score: S);
     fn prefix_add(&mut self, prefix_length: usize, delta: S);
     fn range_add(&mut self, range: Range<usize>, delta: S);
+    fn range_add_batch(&mut self, ranges: &[(Range<usize>, S)]);
 
     fn has_positive_below_zero(&self) -> bool;
     fn has_negative_at_least_zero(&self) -> bool;

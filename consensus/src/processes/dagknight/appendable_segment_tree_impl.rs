@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     hash::Hash,
-    ops::{AddAssign, Range},
+    ops::{AddAssign, Range, Sub},
 };
 
 use num_traits::Zero;
@@ -12,6 +12,30 @@ use crate::processes::dagknight::appendable_segment_tree_api::{
 
 type LeafPosition = usize;
 type NodeIndex = usize;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum BoundaryKind {
+    End = 0,
+    Start = 1,
+}
+
+#[derive(Clone, Copy)]
+struct RangeBoundary<S> {
+    position: LeafPosition,
+    kind: BoundaryKind,
+    delta: S,
+}
+
+impl<S> RangeBoundary<S> {
+    fn start(position: LeafPosition, delta: S) -> Self {
+        Self { position, kind: BoundaryKind::Start, delta }
+    }
+
+    fn end(position: LeafPosition, delta: S) -> Self {
+        Self { position, kind: BoundaryKind::End, delta }
+    }
+}
 
 const ROOT_NODE: NodeIndex = 1;
 
@@ -63,7 +87,7 @@ struct BucketExtrema<T, S> {
 impl<T, S> BucketExtrema<T, S>
 where
     T: Copy,
-    S: Copy + PartialOrd + AddAssign + Zero,
+    S: Copy + PartialOrd + AddAssign + Sub<Output = S> + Zero,
 {
     fn empty() -> Self {
         Self { min_score: None, min_positive: None, max_negative: None, pending_delta: S::zero() }
@@ -158,7 +182,7 @@ pub struct AppendableSegmentTree<T, S = i64> {
 impl<T, S> AppendableSegmentTree<T, S>
 where
     T: Copy + Eq + Hash,
-    S: Copy + PartialOrd + AddAssign + Zero,
+    S: Copy + PartialOrd + AddAssign + Sub<Output = S> + Zero,
 {
     // ---------------------------------------------------------------------
     // Public API
@@ -209,12 +233,33 @@ where
 
     /// Add `delta` to the half-open range of logical leaf positions.
     pub fn range_add(&mut self, update_range: Range<LeafPosition>, delta: S) {
+        // TODO(relaxed): avoid code duplication by calling range_add_batch to implement this.
+        // Current version uses direct implementation for easier reviewability 
         assert!(update_range.start <= update_range.end, "range start exceeds range end");
         assert!(update_range.end <= self.len, "range exceeds tree length");
         if update_range.is_empty() || delta.is_zero() {
             return;
         }
         self.add_to_range(ROOT_NODE, self.full_leaf_range(), &update_range, delta);
+    }
+
+    /// Add independent deltas to several ranges in one tree traversal.
+    pub fn range_add_batch(&mut self, ranges: &[(Range<LeafPosition>, S)]) {
+        for (range, _) in ranges {
+            assert!(range.start <= range.end, "range start exceeds range end");
+            assert!(range.end <= self.len, "range exceeds tree length");
+        }
+        if ranges.is_empty() {
+            return;
+        }
+        if ranges.len()==1{
+            // Handle common case without superflous logic
+            let (range, delta) = ranges[0].clone();
+            self.range_add(range, delta);
+            return;
+        }
+        let ranges = Self::coalesce_ranges(ranges);
+        self.add_to_ranges(ROOT_NODE, self.full_leaf_range(), &ranges);
     }
 
     pub fn has_positive_below_zero(&self) -> bool {
@@ -397,6 +442,87 @@ where
         self.recompute_node(node);
     }
 
+    fn add_to_ranges(&mut self, node: NodeIndex, node_range: Range<LeafPosition>, ranges: &[(Range<LeafPosition>, S)]) {
+        // Partition the updates for this subtree. Updates that fully cover the
+        // subtree can be combined into one lazy delta; only partial updates
+        // need to be passed down to the children.
+        let mut partial = Vec::new();
+        let mut full_delta = S::zero();
+        for (range, delta) in ranges {
+            // This update cannot affect the subtree, so discard it here.
+            if ranges_are_disjoint(&node_range, range) || delta.is_zero() {
+                continue;
+            }
+
+            // Multiple full-cover updates are accumulated and applied together
+            // at this node, avoiding separate traversals for their ranges.
+            if range_fully_contains(range, &node_range) {
+                full_delta += *delta;
+            } else {
+                partial.push((range.clone(), *delta));
+            }
+        }
+
+        // Apply all updates that cover this subtree before descending. The
+        // regular lazy-propagation path carries this combined delta to leaves.
+        if !full_delta.is_zero() {
+            self.apply_delta_to_node(node, full_delta);
+        }
+
+        // No partial updates remain, so this subtree is fully updated.
+        if partial.is_empty() {
+            return;
+        }
+
+        // Partial updates require visiting both children and rebuilding this
+        // node's summary from their updated values.
+        self.push_pending_delta(node);
+        let (left_child_range, right_child_range) = split_range(&node_range);
+        self.add_to_ranges(left_child(node), left_child_range, &partial);
+        self.add_to_ranges(right_child(node), right_child_range, &partial);
+        self.recompute_node(node);
+    }
+
+    fn coalesce_ranges(ranges: &[(Range<LeafPosition>, S)]) -> Vec<(Range<LeafPosition>, S)> {
+        // Represent every range by a start event and an end event. The sweep
+        // between two consecutive positions has one constant combined delta.
+        let mut boundary_events = Vec::with_capacity(ranges.len() * 2);
+        for (range, delta) in ranges {
+            if !range.is_empty() && !delta.is_zero() {
+                boundary_events.push(RangeBoundary::start(range.start, *delta));
+                boundary_events.push(RangeBoundary::end(range.end, *delta));
+            }
+        }
+        // End events sort before start events at the same position, so an ended
+        // range is removed before a new range beginning there is added.
+        boundary_events.sort_unstable_by_key(|event| (event.position, event.kind));
+
+        let mut coalesced_ranges = Vec::new();
+        let mut active_delta = S::zero();
+        let mut previous_boundary = None;
+        let mut event_index = 0;
+        while event_index < boundary_events.len() {
+            let current_boundary = boundary_events[event_index].position;
+            if let Some(previous_boundary) = previous_boundary
+                && previous_boundary < current_boundary
+                && !active_delta.is_zero()
+            {
+                coalesced_ranges.push((previous_boundary..current_boundary, active_delta));
+            }
+
+            while event_index < boundary_events.len() && boundary_events[event_index].position == current_boundary {
+                let event = boundary_events[event_index];
+                active_delta = match event.kind {
+                    BoundaryKind::Start => active_delta + event.delta,
+                    BoundaryKind::End => active_delta - event.delta,
+                };
+                event_index += 1;
+            }
+            previous_boundary = Some(current_boundary);
+        }
+        coalesced_ranges
+    }
+
     // ---------------------------------------------------------------------
     // Lazy propagation
     // ---------------------------------------------------------------------
@@ -505,7 +631,7 @@ where
 impl<T, S> Default for AppendableSegmentTree<T, S>
 where
     T: Copy + Eq + Hash,
-    S: Copy + PartialOrd + AddAssign + Zero,
+    S: Copy + PartialOrd + AddAssign + Sub<Output = S> + Zero,
 {
     fn default() -> Self {
         Self::new()
@@ -515,7 +641,7 @@ where
 impl<T, S> AppendableSegmentTreeApi<T, S> for AppendableSegmentTree<T, S>
 where
     T: Copy + Eq + Hash,
-    S: Copy + PartialOrd + AddAssign + Zero,
+    S: Copy + PartialOrd + AddAssign + Sub<Output = S> + Zero,
 {
     fn with_initial_capacity(initial_capacity: usize) -> Self
     where
@@ -534,6 +660,10 @@ where
 
     fn range_add(&mut self, range: Range<usize>, delta: S) {
         AppendableSegmentTree::range_add(self, range, delta)
+    }
+
+    fn range_add_batch(&mut self, ranges: &[(Range<usize>, S)]) {
+        AppendableSegmentTree::range_add_batch(self, ranges)
     }
 
     fn has_positive_below_zero(&self) -> bool {
