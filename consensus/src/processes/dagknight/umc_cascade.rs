@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use kaspa_consensus_core::{BlueWorkType, KType};
 use kaspa_core::debug;
@@ -181,9 +181,7 @@ impl CascadeMaintainer {
             blue_blocks.extend(mergeset.mergeset_blues.iter().map(|&(hash, work)| BlockWithWork::new(hash, work)));
         }
 
-        while let Some((source, delta)) = inverse_events.pop_front() {
-            self.apply_event(source, delta, reachability);
-        }
+        self.apply_events_batch(inverse_events, reachability);
 
         for block in blue_blocks.into_iter().rev() {
             let chain_id = *self.blk_mapping_to_chains.get(&block.hash).expect("blue block is not present");
@@ -382,9 +380,11 @@ impl CascadeMaintainer {
         // These are the direct effects of all reds in the current mergeset. They
         // are inherent to the mergeset, so apply every one before examining any
         // consequent negative crossing.
-        while let Some((source, delta)) = events.pop_negative() {
-            self.apply_event(source, delta, reachability);
+        let mut direct_events = Vec::new();
+        while let Some(event) = events.pop_negative() {
+            direct_events.push(event);
         }
+        self.apply_events_batch(direct_events, reachability);
     }
 
     /// The depth restriction bounds the number of negative flips processed here.
@@ -418,9 +418,11 @@ impl CascadeMaintainer {
 
             // Every queued event belongs to a flip already committed in this
             // round, so propagate the complete batch before checking again.
-            while let Some((source, delta)) = events.pop_negative() {
-                self.apply_event(source, delta, reachability);
+            let mut crossing_events = Vec::new();
+            while let Some(event) = events.pop_negative() {
+                crossing_events.push(event);
             }
+            self.apply_events_batch(crossing_events, reachability);
         }
     }
 
@@ -429,6 +431,23 @@ impl CascadeMaintainer {
             if let Some(ancestor_index) = strict_ancestor_index(chain, source, reachability) {
                 tree.prefix_add(ancestor_index, delta);
             }
+        }
+    }
+
+    fn apply_events_batch<I>(&mut self, events: I, reachability: &impl ReachabilityService)
+    where
+        I: IntoIterator<Item = (Hash, SignedWork)>,
+    {
+        let mut updates: Vec<Vec<(Range<usize>, SignedWork)>> = (0..self.chains_score_trees.len()).map(|_| Vec::new()).collect();
+        for (source, delta) in events {
+            for (chain_id, chain) in self.blues_chains_decomposition.iter().enumerate() {
+                if let Some(ancestor_index) = strict_ancestor_index(chain, source, reachability) {
+                    updates[chain_id].push((0..ancestor_index, delta));
+                }
+            }
+        }
+        for (tree, chain_updates) in self.chains_score_trees.iter_mut().zip(updates) {
+            tree.range_add_batch(&chain_updates);
         }
     }
 
