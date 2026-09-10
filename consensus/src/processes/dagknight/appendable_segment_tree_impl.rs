@@ -13,62 +13,11 @@ use crate::processes::dagknight::appendable_segment_tree_api::{
 type LeafPosition = usize;
 type NodeIndex = usize;
 
-#[repr(u8)]
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-enum BoundaryKind {
-    End = 0,
-    Start = 1,
-}
-
-#[derive(Clone, Copy)]
-struct RangeBoundary<S> {
-    position: LeafPosition,
-    kind: BoundaryKind,
-    delta: S,
-}
-
-impl<S> RangeBoundary<S> {
-    fn start(position: LeafPosition, delta: S) -> Self {
-        Self { position, kind: BoundaryKind::Start, delta }
-    }
-
-    fn end(position: LeafPosition, delta: S) -> Self {
-        Self { position, kind: BoundaryKind::End, delta }
-    }
-}
+use super::segment_tree_ops::{
+    coalesce_ranges, left_child, parent, range_fully_contains, ranges_are_disjoint, right_child, split_range,
+};
 
 const ROOT_NODE: NodeIndex = 1;
-
-/// Node relationships in the tree's one-based heap layout.
-fn left_child(node: NodeIndex) -> NodeIndex {
-    node * 2
-}
-
-fn right_child(node: NodeIndex) -> NodeIndex {
-    node * 2 + 1
-}
-
-fn parent(node: NodeIndex) -> NodeIndex {
-    debug_assert!(node > ROOT_NODE, "root node has no parent");
-    node / 2
-}
-
-/// Half-open ranges that only touch at a boundary are disjoint.
-fn ranges_are_disjoint(first: &Range<LeafPosition>, second: &Range<LeafPosition>) -> bool {
-    first.end <= second.start || second.end <= first.start
-}
-
-/// Returns whether `outer` contains every position in `inner`.
-fn range_fully_contains(outer: &Range<LeafPosition>, inner: &Range<LeafPosition>) -> bool {
-    outer.start <= inner.start && inner.end <= outer.end
-}
-
-/// Splits a non-leaf range into its two contiguous child ranges.
-fn split_range(range: &Range<LeafPosition>) -> (Range<LeafPosition>, Range<LeafPosition>) {
-    debug_assert!(range.len() > 1, "cannot split a leaf range");
-    let midpoint = range.start + range.len() / 2;
-    (range.start..midpoint, midpoint..range.end)
-}
 
 #[derive(Clone, Copy, Debug)]
 struct ScoreCandidate<T, S> {
@@ -252,14 +201,14 @@ where
         if ranges.is_empty() {
             return;
         }
-        if ranges.len()==1{
+        if ranges.len() == 1 {
             // Handle common case without superflous logic
             let (range, delta) = ranges[0].clone();
             self.range_add(range, delta);
             return;
         }
-        let ranges = Self::coalesce_ranges(ranges);
-        self.add_to_ranges(ROOT_NODE, self.full_leaf_range(), &ranges);
+        let coalesced_ranges = coalesce_ranges(ranges);
+        self.add_to_ranges(ROOT_NODE, self.full_leaf_range(), &coalesced_ranges);
     }
 
     pub fn has_positive_below_zero(&self) -> bool {
@@ -481,46 +430,6 @@ where
         self.add_to_ranges(left_child(node), left_child_range, &partial);
         self.add_to_ranges(right_child(node), right_child_range, &partial);
         self.recompute_node(node);
-    }
-
-    fn coalesce_ranges(ranges: &[(Range<LeafPosition>, S)]) -> Vec<(Range<LeafPosition>, S)> {
-        // Represent every range by a start event and an end event. The sweep
-        // between two consecutive positions has one constant combined delta.
-        let mut boundary_events = Vec::with_capacity(ranges.len() * 2);
-        for (range, delta) in ranges {
-            if !range.is_empty() && !delta.is_zero() {
-                boundary_events.push(RangeBoundary::start(range.start, *delta));
-                boundary_events.push(RangeBoundary::end(range.end, *delta));
-            }
-        }
-        // End events sort before start events at the same position, so an ended
-        // range is removed before a new range beginning there is added.
-        boundary_events.sort_unstable_by_key(|event| (event.position, event.kind));
-
-        let mut coalesced_ranges = Vec::new();
-        let mut active_delta = S::zero();
-        let mut previous_boundary = None;
-        let mut event_index = 0;
-        while event_index < boundary_events.len() {
-            let current_boundary = boundary_events[event_index].position;
-            if let Some(previous_boundary) = previous_boundary
-                && previous_boundary < current_boundary
-                && !active_delta.is_zero()
-            {
-                coalesced_ranges.push((previous_boundary..current_boundary, active_delta));
-            }
-
-            while event_index < boundary_events.len() && boundary_events[event_index].position == current_boundary {
-                let event = boundary_events[event_index];
-                active_delta = match event.kind {
-                    BoundaryKind::Start => active_delta + event.delta,
-                    BoundaryKind::End => active_delta - event.delta,
-                };
-                event_index += 1;
-            }
-            previous_boundary = Some(current_boundary);
-        }
-        coalesced_ranges
     }
 
     // ---------------------------------------------------------------------
