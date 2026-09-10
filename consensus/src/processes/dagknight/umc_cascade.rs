@@ -357,6 +357,43 @@ impl CascadeMaintainer {
 
     // ----- Event processing -----
 
+    /// Stabilizes all positive events produced by the current mergeset.
+    ///
+    /// # Amortized complexity
+    ///
+    /// Let the `c = O(k^2)` chains contain `n_1, ..., n_c` blocks, with
+    /// `sum(n_i) = n`. Propagating one event performs one logarithmic prefix
+    /// update on every affected chain. By concavity of the logarithm, its
+    /// worst-case cost is
+    /// `O(sum_i log(1 + n_i)) = O(c log(1 + n/c))`, hence
+    /// `O(k^2 log(1 + n/k^2))` (usually written `O(k^2 log(n/k^2))`).
+    ///
+    /// The depth restriction gives an `O(k^4)` worst-case bound on negative
+    /// flips in one mergeset round, but the same bound does not hold pointwise
+    /// for positive flips: one round may restore arbitrarily many old negative
+    /// blocks. These flips are nevertheless bounded amortized over the (linear) lifetime
+    /// of the maintainer:
+    ///
+    /// 1. During one mergeset round, a block inside the depth boundary flips
+    ///    at most once to negative and at most once to positive. The
+    ///    `O(k^4)` bound on negative flips therefore also bounds all flips
+    ///    inside the boundary by `O(k^4)` for that round.
+    /// 2. A positive flip strictly beyond the boundary can occur at most once.
+    ///    If that block later obtains a negative score, `violates_depth_restriction`
+    ///    stops processing before `process_negative_crossings` changes its bucket
+    ///    back to negative. Its score may subsequently change, but it cannot
+    ///    cause positive flip processing.
+    ///
+    /// Thus each round has `O(k^4)` flips inside the boundary, plus at most one
+    /// beyond-boundary positive flip per block over the complete history
+    /// (including history restored from a checkpoint). Since a mergeset adds at
+    /// most `O(k^2)` blocks, those one-time flips contribute only `O(k^2)` per
+    /// round amortized. The total is therefore `O(k^4)` flip events per round
+    /// amortized. Multiplying by the cost of propagating an event gives
+    /// `O(k^6 log(n / k^2))` amortized time per mergeset round. Direct events
+    /// from the `O(k^2)` newly processed blocks are lower order. This accounting
+    /// intentionally does not use the range-update batching optimization, 
+    /// which provides de facto speedup, but is hard to analyze.
     fn process_positive_events(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
         while let Some((source, delta)) = events.pop_positive() {
             self.apply_event(source, delta, reachability);
