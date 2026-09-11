@@ -204,6 +204,13 @@ impl CascadeMaintainer {
     ) {
         let mut curr_bound = self.depth_limit_ancestor;
 
+        // The selected-parent path may have changed branches since the last
+        // mergeset. Walk the old bound back until it reaches the new path; the
+        // first ancestor shared by both paths is their lowest common point.
+        while !reachability.is_chain_ancestor_of(curr_bound, merger_selected_parent) {
+            curr_bound = reachability.get_chain_parent(curr_bound);
+        }
+
         while curr_bound != merger_selected_parent {
             let next_bound = reachability.get_next_chain_ancestor(merger_selected_parent, curr_bound);
             let next_distance = merger_blue_score.saturating_sub(coloring_reader.get_coloring_data(next_bound).blue_score);
