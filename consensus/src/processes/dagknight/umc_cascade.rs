@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::{ops::Range, sync::Arc};
 
 use kaspa_consensus_core::{BlueWorkType, KType};
@@ -12,7 +12,7 @@ use crate::model::services::reachability::{MTReachabilityService, ReachabilitySe
 use crate::model::stores::headers::HeaderStoreReader;
 use crate::model::stores::reachability::ReachabilityStoreReader;
 use crate::processes::dagknight::umc_cascade_persistence::{
-    CascadeEvent, ChainLeafEntry, Mergeset, MergesetEvents, UmcCascadeKey, UmcCascadePersistedState, UmcCascadeStore,
+    ChainLeafEntry, Mergeset, UmcCascadeKey, UmcCascadePersistedState, UmcCascadeStore,
 };
 use crate::processes::dagknight::umc_voting::{CascadeResult, ColoringReader, SignedWork, UmcVoter, UmcVotingContext};
 use crate::processes::dagknight::{AppendableSegmentTree, Bucket, bucket_for_score};
@@ -60,33 +60,6 @@ fn work_delta(work: BlueWorkType, bucket: Bucket) -> SignedWork {
     }
 }
 
-struct CascadeEvents {
-    queue: VecDeque<(Hash, SignedWork)>,
-    processed: Vec<CascadeEvent>,
-}
-
-impl CascadeEvents {
-    fn new() -> Self {
-        Self { queue: VecDeque::new(), processed: Vec::new() }
-    }
-
-    fn push(&mut self, source: Hash, delta: SignedWork) {
-        self.queue.push_back((source, delta));
-    }
-
-    fn drain(&mut self) -> Vec<(Hash, SignedWork)> {
-        let events: Vec<_> = self.queue.drain(..).collect();
-        for &(source, delta) in &events {
-            self.record(source, delta);
-        }
-        events
-    }
-
-    fn record(&mut self, source: Hash, delta: SignedWork) {
-        self.processed.push(CascadeEvent { source, delta_abs: delta.abs(), delta_negative: delta.negative() });
-    }
-}
-
 impl CascadeMaintainer {
     /// Initializes the cascade with `floor(sqrt(k))` conflict-genesis work as its voting deficit.
     pub fn new(conflict_genesis: BlockWithWork, k: KType, next_chain_ancestor: Hash) -> Self {
@@ -107,7 +80,7 @@ impl CascadeMaintainer {
     }
 
     /// Insert a new blue block into the chain decomposition
-    fn add_blue(&mut self, block: BlockWithWork, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
+    fn add_blue(&mut self, block: BlockWithWork, reachability: &impl ReachabilityService, events: &mut Vec<(Hash, SignedWork)>) {
         let initial_score = SignedWork::from(self.deficit_work);
         let initial_bucket = bucket_for_score(initial_score);
 
@@ -123,63 +96,13 @@ impl CascadeMaintainer {
 
         // A new blue block contributes according to its initial bucket.
         let initial_contribution = work_delta(block.work, initial_bucket);
-        events.push(block.hash, initial_contribution);
+        events.push((block.hash, initial_contribution));
     }
 
     /// Add a new red block and propagate its negative work to ancestor blues.
-    fn add_red(&mut self, block: BlockWithWork, events: &mut CascadeEvents) {
+    fn add_red(&mut self, block: BlockWithWork, events: &mut Vec<(Hash, SignedWork)>) {
         self.red_work = self.red_work + block.work;
-        events.push(block.hash, work_delta(block.work, Bucket::Negative));
-    }
-    /// Undo a path of previously processed mergesets as one operation.
-    ///
-    /// All inverse events are queued and applied before any blue leaves are
-    /// removed. Blue leaves from the complete path are then removed jointly in
-    /// reverse topological order, without running cascade crossing logic.
-    pub fn unprocess_mergesets(
-        &mut self,
-        mergesets: &[Mergeset],
-        events_diff: &[MergesetEvents],
-        reachability: &impl ReachabilityService,
-    ) {
-        assert_eq!(mergesets.len(), events_diff.len(), "each mergeset must have an events diff");
-        let event_count: usize = events_diff.iter().map(|diff| diff.events.len()).sum();
-        let mut inverse_events = VecDeque::with_capacity(event_count);
-        let mut blue_blocks = Vec::new();
-
-        for (mergeset, events) in mergesets.iter().zip(events_diff) {
-            for event in &events.events {
-                let magnitude = SignedWork::from(event.delta_abs);
-                let delta = if event.delta_negative { magnitude } else { SignedWork::zero() - magnitude };
-                inverse_events.push_back((event.source, delta));
-            }
-
-            for &(hash, work) in &mergeset.mergeset_reds {
-                // ignore gray work
-                if !reachability.is_chain_ancestor_of(self.next_chain_ancestor, hash) {
-                    self.red_work = self.red_work - work;
-                }
-            }
-
-            blue_blocks.extend(mergeset.mergeset_blues.iter().map(|&(hash, work)| BlockWithWork::new(hash, work)));
-        }
-
-        self.apply_events_batch(inverse_events, reachability);
-
-        for block in blue_blocks.into_iter().rev() {
-            let chain_id = *self.blk_mapping_to_chains.get(&block.hash).expect("blue block is not present");
-            let chain = &mut self.blues_chains_decomposition[chain_id];
-            assert_eq!(chain.last().copied(), Some(block.hash), "blue removal must follow reverse topological order");
-            let tree = &mut self.chains_score_trees[chain_id];
-            let bucket = tree.bucket(block);
-            assert!(tree.remove_head(block), "blue block must be the current chain head");
-            chain.pop();
-            self.blk_mapping_to_chains.remove(&block.hash);
-            self.blue_work = self.blue_work - block.work;
-            if bucket == Bucket::Negative {
-                self.negative_blue_work = self.negative_blue_work - block.work;
-            }
-        }
+        events.push((block.hash, work_delta(block.work, Bucket::Negative)));
     }
 
     /// Returns the aggregate score of the virtual block.
@@ -241,7 +164,7 @@ impl CascadeMaintainer {
     // ----- Persistence -----
 
     /// Serialize the current cascade state for checkpoint persistence.
-    pub fn to_persisted_state(&mut self, voting_blocks: u64, events_diff: Vec<MergesetEvents>) -> UmcCascadePersistedState {
+    pub fn to_persisted_state(&mut self, voting_blocks: u64) -> UmcCascadePersistedState {
         let mut chains_leaves: Vec<Vec<ChainLeafEntry>> = Vec::new();
 
         for (chain_id, _chain) in self.blues_chains_decomposition.iter().enumerate() {
@@ -274,7 +197,6 @@ impl CascadeMaintainer {
             red_work: self.red_work,
             negative_blue_work: self.negative_blue_work,
             voting_blocks,
-            events_diff,
             flip_count: self.flip_count,
         }
     }
@@ -382,9 +304,9 @@ impl CascadeMaintainer {
     /// from the `O(k^2)` newly processed blocks are lower order. This accounting
     /// intentionally does not use the range-update batching optimization,
     /// which provides de facto speedup, but is hard to analyze.
-    fn process_positive_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        while !events.queue.is_empty() {
-            self.apply_events_batch(events.drain(), reachability);
+    fn process_positive_phase(&mut self, reachability: &impl ReachabilityService, events: &mut Vec<(Hash, SignedWork)>) {
+        while !events.is_empty() {
+            self.apply_events_batch(events.drain(..), reachability);
 
             for chain_id in 0..self.chains_score_trees.len() {
                 let crossing_blocks = self.chains_score_trees[chain_id].extract_negative_at_least_zero_batch();
@@ -392,7 +314,7 @@ impl CascadeMaintainer {
                     self.chains_score_trees[chain_id].flip_to_positive(block);
                     self.negative_blue_work = self.negative_blue_work - block.work;
                     self.flip_count += 1;
-                    events.push(block.hash, work_delta(block.work * 2u64, Bucket::Positive));
+                    events.push((block.hash, work_delta(block.work * 2u64, Bucket::Positive)));
                 }
             }
         }
@@ -405,14 +327,11 @@ impl CascadeMaintainer {
     /// selected-chain interval up to the merger and its mergeset blues), while
     /// the blue anticone of the bound contributes at most another `k^2` blocks.
     /// Hence at most `(k^4 + k^2) + k^2` negative flips are processed.
-    fn process_negative_phase(&mut self, reachability: &impl ReachabilityService, events: &mut CascadeEvents) {
-        debug_assert!(
-            events.queue.iter().all(|(_, delta)| *delta < SignedWork::zero()),
-            "red processing must start with negative events"
-        );
+    fn process_negative_phase(&mut self, reachability: &impl ReachabilityService, events: &mut Vec<(Hash, SignedWork)>) {
+        debug_assert!(events.iter().all(|(_, delta)| *delta < SignedWork::zero()), "red processing must start with negative events");
 
         loop {
-            self.apply_events_batch(events.drain(), reachability);
+            self.apply_events_batch(events.drain(..), reachability);
 
             if self.violates_depth_restriction(reachability) {
                 return;
@@ -424,11 +343,11 @@ impl CascadeMaintainer {
                     self.chains_score_trees[chain_id].flip_to_negative(block);
                     self.negative_blue_work = self.negative_blue_work + block.work;
                     self.flip_count += 1;
-                    events.push(block.hash, work_delta(block.work * 2u64, Bucket::Negative));
+                    events.push((block.hash, work_delta(block.work * 2u64, Bucket::Negative)));
                 }
             }
 
-            if events.queue.is_empty() {
+            if events.is_empty() {
                 break;
             }
 
@@ -460,10 +379,9 @@ impl CascadeMaintainer {
         &mut self,
         key: UmcCascadeKey,
         voting_blocks: u64,
-        events_diff: Vec<MergesetEvents>,
         cascade_store: Arc<dyn UmcCascadeStore>,
     ) -> Result<(), StoreError> {
-        let persisted_state = self.to_persisted_state(voting_blocks, events_diff);
+        let persisted_state = self.to_persisted_state(voting_blocks);
         cascade_store.insert_checkpoint(key, persisted_state)
     }
 }
@@ -538,7 +456,6 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
     coloring_reader: &C,
 ) -> CascadeResult {
     let mut voting_blocks = 0u64;
-    let mut events_diff = checkpoint_state.as_ref().map(|state| state.events_diff.clone()).unwrap_or_default();
     let from_checkpoint = checkpoint_state.is_some();
 
     // Restore from checkpoint or start fresh
@@ -553,14 +470,12 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
     while let Some(mergeset) = mergeset_stack.pop() {
         let checkpoint_key = (!mergeset_stack.is_empty())
             .then(|| UmcCascadeKey::new(conflict_genesis.hash, k, next_chain_ancestor, mergeset.checkpoint_hash()));
-        let mergeset_hash = mergeset.checkpoint_hash();
-        let (processed_blocks, mergeset_events) = process_mergeset(&mut maintainer, mergeset, reachability, coloring_reader);
+        let processed_blocks = process_mergeset(&mut maintainer, mergeset, reachability, coloring_reader);
         voting_blocks += processed_blocks;
-        events_diff.push(MergesetEvents { mergeset_hash, events: mergeset_events });
 
         // Checkpoint at chain block — persist to store (best-effort)
         if let Some(checkpoint_key) = checkpoint_key {
-            let _ = maintainer.save_state(checkpoint_key, voting_blocks, events_diff.clone(), cascade_store.clone());
+            let _ = maintainer.save_state(checkpoint_key, voting_blocks, cascade_store.clone());
         }
     }
 
@@ -573,7 +488,6 @@ pub fn run_cascade<C: ColoringReader + ?Sized>(
         accepted,
         flips: maintainer.flip_count,
         voting_blocks,
-        events_diff,
         from_checkpoint,
         estimated_effort_saved,
         estimated_effort_total,
@@ -591,7 +505,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
     mergeset: Mergeset,
     reachability: &impl ReachabilityService,
     coloring_reader: &C,
-) -> (u64, Vec<CascadeEvent>) {
+) -> u64 {
     let selected_parent = mergeset.selected_parent;
     let merger_blue_score = coloring_reader.get_coloring_data(selected_parent).blue_score + mergeset.mergeset_blues.len() as u64;
 
@@ -599,7 +513,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
     // concrete selected parent as the chain endpoint.
     maintainer.update_depth_limit_ancestor(selected_parent, merger_blue_score, coloring_reader, reachability);
 
-    let mut events = CascadeEvents::new();
+    let mut events = Vec::new();
     let mut voting_blocks = 0u64;
 
     for (hash, work) in mergeset.mergeset_blues {
@@ -615,7 +529,7 @@ fn process_mergeset<C: ColoringReader + ?Sized>(
 
     maintainer.process_positive_phase(reachability, &mut events);
     maintainer.process_negative_phase(reachability, &mut events);
-    (voting_blocks, events.processed)
+    voting_blocks
 }
 
 // Segment Tree UMC Voter

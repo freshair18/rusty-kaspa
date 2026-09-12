@@ -12,8 +12,10 @@ use kaspa_utils::mem_size::MemSizeEstimator;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 
+// Use a new hash domain so checkpoints containing the removed event-history field
+// are not loaded as the current state format.
 kaspa_hashes::blake2b_hasher! {
-    struct UmcCascadeMergesetHasher => b"UmcCascadeMergesetHash",
+    struct UmcCascadeMergesetHasher => b"UmcCascadeMergesetHashV2",
 }
 
 // ============================================================================
@@ -70,21 +72,6 @@ pub struct Mergeset {
     pub mergeset_blues: Vec<(Hash, BlueWorkType)>,
     /// Red blocks in this mergeset (may include grays - caller must filter), also assumed to be in topological order
     pub mergeset_reds: Vec<(Hash, BlueWorkType)>,
-}
-
-/// A single cascade event applied while processing a mergeset.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CascadeEvent {
-    pub source: Hash,
-    pub delta_abs: Uint192,
-    pub delta_negative: bool,
-}
-
-/// All cascade events processed for one mergeset.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MergesetEvents {
-    pub mergeset_hash: Hash,
-    pub events: Vec<CascadeEvent>,
 }
 
 impl Mergeset {
@@ -147,9 +134,6 @@ pub struct UmcCascadePersistedState {
     pub negative_blue_work: Uint192,
     /// Number of voting blocks processed up to this checkpoint
     pub voting_blocks: u64,
-    /// Cascade events grouped by the mergeset that produced them.
-    #[serde(default)]
-    pub events_diff: Vec<MergesetEvents>,
     /// Total bucket flips observed up to this checkpoint
     pub flip_count: u64,
 }
@@ -160,8 +144,6 @@ impl MemSizeEstimator for UmcCascadePersistedState {
         bytes += self.blues_chains_decomposition.iter().map(|c| c.len() * size_of::<Hash>()).sum::<usize>();
         bytes += self.chains_leaves.iter().map(|l| l.len() * size_of::<ChainLeafEntry>()).sum::<usize>();
         bytes += self.blk_mapping_to_chains.len() * size_of::<(Hash, usize)>();
-        bytes +=
-            self.events_diff.iter().map(|m| size_of::<MergesetEvents>() + m.events.len() * size_of::<CascadeEvent>()).sum::<usize>();
         bytes
     }
 }
@@ -297,7 +279,6 @@ mod tests {
             red_work: Uint192::ZERO,
             negative_blue_work: Uint192::ZERO,
             voting_blocks,
-            events_diff: vec![],
             flip_count: 0,
         }
     }
