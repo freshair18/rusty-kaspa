@@ -738,22 +738,24 @@ impl<O: HeaderStoreReader + 'static, E: UmcCascadeStore + Clone + 'static, R: Re
 mod checkpoint_tests {
     use super::*;
     use crate::model::services::reachability::MTReachabilityService;
-    use crate::model::stores::reachability::{MemoryReachabilityStore, ReachabilityStore};
+    use crate::model::stores::reachability::MemoryReachabilityStore;
     use crate::processes::dagknight::umc_cascade_persistence::{MemoryUmcCascadeStore, UmcCascadeKey, UmcCascadeStoreReader};
     use crate::processes::dagknight::umc_voting::test_fixtures::{MemoryColoringReader, make_gd};
-    use crate::processes::reachability::interval::Interval;
+    use crate::processes::reachability::inquirer;
     use kaspa_consensus_core::blockhash::ORIGIN;
 
     fn make_reachability()
     -> (MTReachabilityService<MemoryReachabilityStore>, std::sync::Arc<parking_lot::RwLock<MemoryReachabilityStore>>) {
-        let store = MemoryReachabilityStore::new();
+        let mut store = MemoryReachabilityStore::new();
+        inquirer::init(&mut store).unwrap();
         let arc = std::sync::Arc::new(parking_lot::RwLock::new(store));
         (MTReachabilityService::new(arc.clone()), arc)
     }
 
-    fn reach_insert(arc: &std::sync::Arc<parking_lot::RwLock<MemoryReachabilityStore>>, hash: Hash, parent: Hash, height: u64) {
+    fn reach_insert(arc: &std::sync::Arc<parking_lot::RwLock<MemoryReachabilityStore>>, hash: Hash, parent: Hash) {
         let mut store = arc.write();
-        store.insert(hash, parent, Interval::new(height, height), height).unwrap();
+        // Maintain nested intervals and child links required by ancestry queries.
+        inquirer::add_block(&mut *store, hash, parent, &mut std::iter::empty()).unwrap();
     }
 
     fn work() -> BlueWorkType {
@@ -772,11 +774,11 @@ mod checkpoint_tests {
     fn test_checkpoint_reload_produces_identical_result() {
         // Build a simple DAG: 1→2→3→4→5, conflict genesis at 3
         let (reachability, arc) = make_reachability();
-        reach_insert(&arc, Hash::from_u64_word(1), Hash::from_u64_word(0), 1);
-        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1), 2);
-        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(2), 3);
-        reach_insert(&arc, Hash::from_u64_word(4), Hash::from_u64_word(3), 4);
-        reach_insert(&arc, Hash::from_u64_word(5), Hash::from_u64_word(4), 5);
+        reach_insert(&arc, Hash::from_u64_word(1), ORIGIN);
+        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1));
+        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(2));
+        reach_insert(&arc, Hash::from_u64_word(4), Hash::from_u64_word(3));
+        reach_insert(&arc, Hash::from_u64_word(5), Hash::from_u64_word(4));
 
         let store = Arc::new(MemoryUmcCascadeStore::new());
         let cg = BlockWithWork::new(Hash::from_u64_word(3), work());
@@ -838,10 +840,10 @@ mod checkpoint_tests {
     fn test_checkpoint_with_grays_filtered() {
         // Test that gray filtering works correctly with checkpoint reload
         let (reachability, arc) = make_reachability();
-        reach_insert(&arc, Hash::from_u64_word(1), Hash::from_u64_word(0), 1);
-        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1), 2);
-        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(2), 3);
-        reach_insert(&arc, Hash::from_u64_word(4), Hash::from_u64_word(3), 4);
+        reach_insert(&arc, Hash::from_u64_word(1), ORIGIN);
+        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1));
+        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(2));
+        reach_insert(&arc, Hash::from_u64_word(4), Hash::from_u64_word(3));
 
         let store = Arc::new(MemoryUmcCascadeStore::new());
         let cg = BlockWithWork::new(Hash::from_u64_word(2), work());
@@ -896,9 +898,9 @@ mod checkpoint_tests {
     fn test_checkpoint_different_nca_different_key() {
         // Test that different NCA produces different checkpoint key
         let (reachability, arc) = make_reachability();
-        reach_insert(&arc, Hash::from_u64_word(1), ORIGIN, 1);
-        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1), 2);
-        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(1), 3);
+        reach_insert(&arc, Hash::from_u64_word(1), ORIGIN);
+        reach_insert(&arc, Hash::from_u64_word(2), Hash::from_u64_word(1));
+        reach_insert(&arc, Hash::from_u64_word(3), Hash::from_u64_word(1));
 
         let store = Arc::new(MemoryUmcCascadeStore::new());
         let cg = BlockWithWork::new(Hash::from_u64_word(1), work());
