@@ -27,5 +27,12 @@ smallvec.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "cache"
+harness = false
+
 [lints]
 workspace = true

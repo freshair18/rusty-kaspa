@@ -77,6 +77,12 @@ where
             self.tracked_evict(policy);
         } else {
             if self.map.len() == policy.max_size {
+                // Replacing an existing value needs no eviction. Evicting first
+                // would discard an unrelated hot entry on almost every update.
+                if let Some(existing) = self.map.get_mut(&key) {
+                    *existing = data;
+                    return;
+                }
                 self.map.swap_remove_index(rand::thread_rng().gen_range(0..policy.max_size));
             }
             self.map.insert(key, data);
@@ -146,10 +152,16 @@ where
     }
 
     pub fn get(&self, key: &TKey) -> Option<TData> {
+        if self.policy.max_size == 0 {
+            return None;
+        }
         self.inner.read().map.get(key).cloned()
     }
 
     pub fn contains_key(&self, key: &TKey) -> bool {
+        if self.policy.max_size == 0 {
+            return false;
+        }
         self.inner.read().map.contains_key(key)
     }
 
@@ -207,5 +219,52 @@ where
         if self.policy.tracked {
             inner.tracked_size = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_cache_updates_preserve_other_entries() {
+        let cache = Cache::<u64, u64>::new(CachePolicy::Count(16));
+        cache.insert_many(&mut (0..16).map(|key| (key, key)));
+        for value in 16..80 {
+            cache.insert(value % 16, value);
+            assert_eq!(cache.get(&(value % 16)), Some(value));
+            assert_eq!(cache.inner.read().map.len(), 16);
+            assert!((0..16).all(|key| cache.contains_key(&key)));
+        }
+        cache.insert(100, 100);
+        assert_eq!(cache.get(&100), Some(100));
+        assert_eq!(cache.inner.read().map.len(), 16);
+    }
+
+    #[test]
+    fn disabled_cache_reads_do_not_acquire_lock() {
+        for policy in [CachePolicy::Empty, CachePolicy::Count(0)] {
+            let cache = Cache::<u64, u64>::new(policy);
+            cache.insert(1, 2);
+            let _guard = cache.inner.write();
+            assert_eq!(cache.get(&1), None);
+            assert!(!cache.contains_key(&1));
+        }
+    }
+
+    #[test]
+    fn tracked_cache_update_and_eviction_accounting() {
+        let cache = Cache::<u64, Vec<u64>>::new(CachePolicy::Tracked { max_size: 10, min_items: 1, mem_mode: MemMode::Units });
+        cache.insert(1, vec![0; 4]);
+        cache.insert(2, vec![0; 4]);
+        cache.insert(1, vec![0; 6]);
+        assert_eq!(cache.inner.read().tracked_size, 10);
+        cache.update_if_entry_exists(1, |value| value.push(0));
+        let inner = cache.inner.read();
+        assert_eq!(inner.tracked_size, inner.map.values().map(Vec::len).sum::<usize>());
+        assert!(inner.tracked_size <= 10 || inner.map.len() <= 1);
+        drop(inner);
+        cache.remove_all();
+        assert_eq!(cache.inner.read().tracked_size, 0);
     }
 }
