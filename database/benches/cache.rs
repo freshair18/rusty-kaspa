@@ -3,16 +3,16 @@ use indexmap::IndexMap;
 use kaspa_database::prelude::{Cache, CachePolicy};
 use parking_lot::RwLock;
 use rand::Rng;
-use std::{hint::black_box, time::Duration};
+use std::{hint::black_box, sync::Arc, time::Duration};
 
 struct UpstreamCountCache {
-    map: RwLock<IndexMap<u64, u64>>,
+    map: Arc<RwLock<IndexMap<u64, u64>>>,
     capacity: usize,
 }
 
 impl UpstreamCountCache {
     fn full(capacity: usize) -> Self {
-        Self { map: RwLock::new((0..capacity as u64).map(|key| (key, key)).collect()), capacity }
+        Self { map: Arc::new(RwLock::new((0..capacity as u64).map(|key| (key, key)).collect())), capacity }
     }
 
     fn insert(&self, key: u64, value: u64) {
